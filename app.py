@@ -130,6 +130,8 @@ if st.session_state.last_query:
     )
 
     st.caption(f"Соңғы сұрау: {active_query}")
+    if "max_price_kzt" in filters:
+        st.caption(f"Қолданылған баға шегі: {filters['max_price_kzt']:,.0f} ₸")
 
     if results.empty:
         st.info("Осы шарттарға сәйкес тауар табылмады.")

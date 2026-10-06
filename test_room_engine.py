@@ -46,7 +46,7 @@ class RoomTests(unittest.TestCase):
         self.assertTrue(all(i.get("placeholder") and i["price_kzt"] is None for i in items))
     def test_hidden_required(self):
         with self.assertRaises(ValueError):
-            candidate_sets(pd.DataFrame(self.items),self.room,{"B"})
+            candidate_sets(pd.DataFrame(self.items),self.room,{"B"},missing_policy="strict")
     def test_budget(self):
         with self.assertRaises(ValueError):
             candidate_sets(pd.DataFrame(self.items),{**self.room,"budget_kzt":100000})
@@ -121,6 +121,44 @@ class RoomTests(unittest.TestCase):
     def test_new_room_types(self):
         self.assertEqual(parse_room_request('Асүй 4 на 4 метра')['room_type'],'kitchen')
         self.assertEqual(parse_room_request('Дизайн столовой 4 на 4 метра')['room_type'],'dining_room')
+
+    def test_missing_office_defaults_to_templates(self):
+        room = {**self.room,'room_type':'office'}
+        items = candidate_sets(pd.DataFrame(self.items),room)[0]
+        self.assertEqual({i['category'] for i in items},{'desk','chair'})
+        self.assertTrue(all(i.get('placeholder') for i in items))
+        self.assertTrue(all(i['price_kzt'] is None for i in items))
+
+    def test_two_placeholder_chairs_have_separate_placements(self):
+        room = {**self.room,'room_type':'office','quantities':{'desk':1,'chair':2,'dresser':0,'bookcase':0}}
+        items = candidate_sets(pd.DataFrame(self.items),room)[0]
+        chairs = [i for i in items if i['category']=='chair']
+        self.assertEqual(len(chairs),2)
+        self.assertEqual({i['product_id'] for i in chairs},{'PLACEHOLDER_CHAIR__1','PLACEHOLDER_CHAIR__2'})
+        self.assertTrue(all(i['base_product_id']=='PLACEHOLDER_CHAIR' for i in chairs))
+        plan = algorithm_layout(items,room)
+        self.assertIsNotNone(plan)
+        self.assertEqual(validate_layout(items,plan,room),[])
+        self.assertEqual(len(plan),3)
+
+    def test_multiple_catalog_prices_and_budget(self):
+        room = {**self.room,'quantities':{'bed':1,'wardrobe':2}}
+        items = candidate_sets(pd.DataFrame(self.items),room)[0]
+        self.assertEqual(catalog_cost(items),262000)
+        self.assertEqual(len({i['product_id'] for i in items}),3)
+        with self.assertRaises(ValueError):
+            candidate_sets(pd.DataFrame(self.items),{**room,'budget_kzt':250000})
+
+    def test_invalid_and_zero_quantities(self):
+        for quantities in ({'chair':2},{'bed':0},{'bed':-1},{'bed':True},{'bed':7},{'bed':1.5}):
+            with self.subTest(quantities=quantities):
+                with self.assertRaises(ValueError):
+                    candidate_sets(pd.DataFrame(self.items),{**self.room,'quantities':quantities})
+
+    def test_quantity_query(self):
+        parsed = parse_room_request('Кабинет 4 на 4 метра, 1 письменный стол и 2 стула')
+        self.assertEqual(parsed['quantities'],{'desk':1,'chair':2})
+        self.assertEqual(parse_room_request('2 орындық керек')['quantities'],{'chair':2})
 
     def test_cloud_403_details_redacted(self):
         from urllib.error import HTTPError

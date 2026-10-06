@@ -36,6 +36,12 @@ PLACEHOLDERS = {
     "sofa": ("Үлгілік диван",220,90,85),
     "desk": ("Үлгілік үстел",120,60,75),
     "chair": ("Үлгілік орындық",50,50,90),
+    "nightstand": ("Үлгілік тумба",50,40,50),
+    "dresser": ("Үлгілік комод",80,40,80),
+    "bookcase": ("Үлгілік кітап шкафы",80,30,180),
+    "coffee_table": ("Үлгілік журнальдық үстел",100,60,45),
+    "tv_stand": ("Үлгілік ТВ тумбасы",140,40,50),
+    "armchair": ("Үлгілік кресло",80,80,90),
     "kitchen_cabinets": ("Үлгілік асүй жиһазы",180,60,85),
     "dining_table": ("Үлгілік асхана үстелі",120,80,75),
 }
@@ -47,6 +53,20 @@ def placeholder_item(category, request):
             "width_cm":w,"depth_cm":d,"height_cm":h,"price_kzt":None,"placeholder":True,
             "color":request.get("color") or "анықталмаған","style":request.get("style") or "",
             "available":False,"product_url":None,"score":0.0,"room_types":request["room_type"]}
+
+
+def expand_item(item, count=1):
+    if isinstance(count,bool) or not isinstance(count,int) or not 1 <= count <= 6:
+        raise ValueError("Жиһаз саны 1–6 аралығындағы бүтін сан болуы керек.")
+    base = str(item["product_id"])
+    copies = []
+    for number in range(1,count+1):
+        copy = dict(item)
+        copy["base_product_id"] = base
+        copy["product_id"] = base if count==1 else f"{base}__{number}"
+        copy["instance_number"] = number
+        copies.append(copy)
+    return copies
 
 
 def catalog_cost(items):
@@ -78,6 +98,24 @@ def parse_room_request(text):
         if re.search(pattern, s):
             out["color"] = name
             break
+    quantity_patterns = {
+        "chair": r"(?:стул\w*|орындық\w*|chair\w*)",
+        "desk": r"(?:письменн\w*\s+стол\w*|жұмыс\s+үстел\w*|desk\w*)",
+        "dining_table": r"(?:обеденн\w*\s+стол\w*|асхана\s+үстел\w*)",
+        "wardrobe": r"(?:шкаф\w*|wardrobe\w*)",
+        "bed": r"(?:кроват\w*|төсек\w*|bed\w*)",
+        "sofa": r"(?:диван\w*|sofa\w*)",
+        "dresser": r"(?:комод\w*|dresser\w*)",
+        "nightstand": r"(?:прикроватн\w*\s+тумб\w*|nightstand\w*)",
+        "armchair": r"(?:кресл\w*|armchair\w*)",
+    }
+    quantities = {}
+    for category,pattern in quantity_patterns.items():
+        match = re.search(r"\b(\d+)\s*(?:дана\s*)?"+pattern,s)
+        if match:
+            quantities[category] = int(match[1])
+    if quantities:
+        out["quantities"] = quantities
     return out
 
 
@@ -97,7 +135,7 @@ def styles(value):
     return normalized
 
 
-def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_policy="strict"):
+def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_policy="placeholder"):
     """Bounded beam search; not a proof of global optimality."""
     if request["room_type"] not in ROOMS:
         raise ValueError("Бөлме түрі қолдау таппайды.")
@@ -129,7 +167,20 @@ def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_p
     w, d = request["width_cm"], request["depth_cm"]
     df = df[((df.width_cm <= w) & (df.depth_cm <= d)) | ((df.depth_cm <= w) & (df.width_cm <= d))]
     df["score"] = df["product_id"].map(scores or {}).fillna(0.0)
-    required, optional = ROOMS[request["room_type"]]
+    required, optional = [list(cats) for cats in ROOMS[request["room_type"]]]
+    quantities = request.get("quantities",{})
+    allowed = set(required+optional)
+    if set(quantities)-allowed:
+        raise ValueError("Бұл бөлме түріне сәйкес емес жиһаз категориясы.")
+    if any(isinstance(v,bool) or not isinstance(v,int) or not 0<=v<=6 for v in quantities.values()):
+        raise ValueError("Жиһаз саны 0–6 аралығындағы бүтін сан болуы керек.")
+    if any(quantities.get(cat,1)<1 for cat in required):
+        raise ValueError("Міндетті жиһаз саны кемінде 1 болуы керек.")
+    if quantities:
+        required = required + [cat for cat in optional if quantities.get(cat,0)>0]
+        optional = []
+    if sum(quantities.get(cat,1) for cat in required+optional)>20:
+        raise ValueError("Бір жоспарға ең көбі 20 жиһаз данасы.")
     groups = {cat: df[df.category == cat].sort_values(["score", "price_kzt"], ascending=[False, True]).head(8).to_dict("records") for cat in required + optional}
     missing = [cat for cat in required if not groups[cat]]
     if missing and missing_policy == "strict":
@@ -148,9 +199,10 @@ def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_p
         expanded = []
         for items, cost, score in states:
             for item in options:
-                newcost = cost + (catalog_cost([item]) if item else 0)
+                bundle = expand_item(item,quantities.get(cat,1)) if item else []
+                newcost = cost + catalog_cost(bundle)
                 if budget is None or newcost <= budget:
-                    expanded.append((items + ([item] if item else []), newcost,
+                    expanded.append((items + bundle, newcost,
                                      score + (1 + item["score"] if item else 0)))
         ranked_states = sorted(expanded, key=lambda s: (-s[2], s[1]))
         counts_at_step = sorted({len(state[0]) for state in ranked_states},reverse=True)
@@ -412,3 +464,4 @@ def draw_layout(items, placements, request, blocked=(), clearance=60):
     ax.tick_params(labelsize=10)
     fig.tight_layout(pad=1)
     return fig
+

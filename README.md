@@ -56,3 +56,9 @@ SQLite memory is scoped by the catalog content hash to prevent old hidden IDs fr
 Living rooms also consider wardrobes, dressers and dining tables. Candidate selection reserves smaller sets so optional pieces do not exclude every geometric plan.
 Models receive a validated algorithm layout as a starting point and may improve it. Invalid model geometry raises a geometry error, not an API permission error. Optional algorithm fallback is labelled explicitly as non-AI.
 The floor plan has no 300px image height cap; use the full-width toggle for a larger view. Numbered blocks correspond to the furniture list.
+
+
+### Furniture quantities and automatic templates
+Missing requested furniture defaults to clearly marked templates. The room page lets users choose 1–6 copies per category (0 disables optional categories), up to 20 items. Counts in queries such as "1 письменный стол и 2 стула" populate the controls.
+Each copy has its own layout ID and coordinates, while base_product_id retains the catalog identity for images and hidden-item checks. Catalog prices multiply by count; template prices remain unknown. JSON import rebuilds copies from current catalog/template data and checks category counts.
+Product search also understands "бағасы 100 ден төмен" as a 100 KZT cap; "100 мың" means 100,000 KZT. The applied price cap appears above results.

@@ -41,7 +41,7 @@ def find_product_image(base, row):
         if path.is_relative_to(folder.resolve()):
             candidates.append(path)
     if folder.exists():
-        candidates.extend(p for p in folder.iterdir() if p.stem.casefold()==str(row["product_id"]).casefold())
+        candidates.extend(p for p in folder.iterdir() if p.stem.casefold()==str(row.get("base_product_id",row["product_id"])).casefold())
     manifest = base/"legacy_image_hashes.json"
     legacy = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
     for path in candidates:
@@ -56,3 +56,4 @@ def find_product_image(base, row):
 
 def source_link_label(url):
     return "Kaspi-де тауарды ашу" if "/shop/p/" in str(url) else "Kaspi категориясын ашу"
+

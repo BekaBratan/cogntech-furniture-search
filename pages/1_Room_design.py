@@ -1,6 +1,7 @@
 """Streamlit multipage room planner; run from the existing app.py."""
 import io
 import json
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ from ui import apply_theme, hero, missing_image
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
                          qwen_layout, cloud_layout, validate_layout, draw_layout,
-                         PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError, LayoutValidationError)
+                         PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError, LayoutValidationError, expand_item)
 
 st.set_page_config(page_title="Бөлме дизайны",layout="wide")
 apply_theme()
@@ -51,6 +52,13 @@ if st.button("Сұраудан параметрлерді алу"):
                 st.warning("Бюджет кемінде 1000 ₸ болуы керек; қолмен түзетіңіз.")
             else:
                 st.session_state[key] = parsed[source]
+    parsed_kind = parsed.get("room_type",st.session_state.get("room_kind","bedroom"))
+    for category,count in parsed.get("quantities",{}).items():
+        if category in set(ROOMS[parsed_kind][0]+ROOMS[parsed_kind][1]):
+            if 1<=count<=6:
+                st.session_state[f"quantity_{parsed_kind}_{category}"] = count
+            else:
+                st.warning("Бір категориядан 1–6 дана таңдауға болады; санды қолмен түзетіңіз.")
     st.info("Төмендегі параметрлерді тексеріңіз. Есік пен терезені бөлек белгілеңіз.")
 
 a,b,c = st.columns(3)
@@ -82,10 +90,25 @@ except (ValueError,TypeError):
 if not blocked:
     st.warning("Алдын ала схема: есік пен терезе орны көрсетілмеген.")
 
-policy_label = st.radio("Қажетті категория табылмаса",["Бар жиһазбен жоспар жасау","Үлгілік жиһазбен толықтыру","Толық жиынтықты талап ету"])
-missing_policy = {"Бар жиһазбен жоспар жасау":"available","Үлгілік жиһазбен толықтыру":"placeholder","Толық жиынтықты талап ету":"strict"}[policy_label]
+policy_label = st.radio("Қажетті категория табылмаса",["Үлгілік жиһазбен толықтыру","Толық жиынтықты талап ету"])
+missing_policy = {"Үлгілік жиһазбен толықтыру":"placeholder","Толық жиынтықты талап ету":"strict"}[policy_label]
 if missing_policy == "placeholder":
-    st.caption("Үлгілік жиһаз — сатып алынатын тауар емес. Стандартты прототип өлшемі беріледі, бағасы белгісіз.")
+    st.caption("Каталогтан сәйкес жиһаз табылмаса, стандартты өлшемдегі үлгі автоматты қойылады. Оның бағасы белгісіз.")
+
+quantity_names = {"bed":"Төсек","wardrobe":"Шкаф","sofa":"Диван","desk":"Жұмыс үстелі","chair":"Орындық",
+                  "dresser":"Комод","nightstand":"Тумба","coffee_table":"Журнальдық үстел",
+                  "tv_stand":"ТВ тумбасы","armchair":"Кресло","bookcase":"Кітап шкафы",
+                  "kitchen_cabinets":"Асүй жиһазы","dining_table":"Асхана үстелі"}
+quantities = {}
+with st.expander("Жиһаз категориялары және саны",expanded=True):
+    st.caption("Қосымша жиһаз үшін 0 — қоспау. Саны көрсетілген категория толық беріледі; қажет болса үлгімен толықтырылады.")
+    columns = st.columns(3)
+    for index,category in enumerate(ROOMS[kind][0]+ROOMS[kind][1]):
+        mandatory = category in ROOMS[kind][0]
+        default = 1 if mandatory or category in set(catalog.category) else 0
+        quantity_key = f"quantity_{kind}_{category}"
+        quantities[category] = columns[index%3].number_input(quantity_names.get(category,category)+" · дана",
+            min_value=1 if mandatory else 0,max_value=6,value=None if quantity_key in st.session_state else default,step=1,key=quantity_key)
 
 mode = st.radio("Орналастыру әдісі",["AI · бұлт (Groq)","AI · Qwen (жергілікті Ollama)","Алгоритм · AI емес","Дайын AI JSON жүктеу"])
 cloud_key, cloud_model = "", "openai/gpt-oss-20b"
@@ -102,7 +125,7 @@ if "Groq" in mode:
         st.info("Streamlit → Settings → Secrets: GROQ_API_KEY қосыңыз. Кілтті GitHub-қа жазбаңыз.")
 upload = st.file_uploader("Экспортталған жоспар JSON",type="json") if mode.startswith("Дайын") else None
 fallback = st.checkbox("AI қате берсе, алгоритммен жоспар жасау",value=True) if mode.startswith("AI") else False
-request = {"room_type":kind,"width_cm":width,"depth_cm":depth,"budget_kzt":budget,"color":color,"style":style}
+request = {"room_type":kind,"width_cm":width,"depth_cm":depth,"budget_kzt":budget,"color":color,"style":style,"quantities":quantities}
 fingerprint = json.dumps([catalog_key(BASE),request,blocked,clearance,query,mode,missing_policy,fallback],sort_keys=True)
 
 if st.button("Жиһаз таңдап, схема жасау",type="primary"):
@@ -122,25 +145,24 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
             ids = [str(p["product_id"]) for p in plan["placements"]]
             if len(ids)!=len(set(ids)):
                 raise ValueError("JSON ішінде қайталанған ID бар.")
-            virtual = []
-            for category in PLACEHOLDERS:
-                candidate = placeholder_item(category,request)
-                if candidate["product_id"] in ids:
-                    if missing_policy != "placeholder":
-                        raise ValueError("Бұл JSON үшін үлгілік жиһаз режимін таңдаңыз.")
-                    virtual.append(candidate)
-            chosen = catalog[catalog.product_id.isin(ids)].copy()
-            for column in ("width_cm", "depth_cm", "price_kzt"):
-                chosen[column] = pd.to_numeric(chosen[column], errors="coerce")
-            items = chosen.to_dict("records") + virtual
-            if len(items)!=len(ids):
-                raise ValueError("JSON тауарлары қазіргі каталогта жоқ.")
-            # Enforce current catalog constraints, not file-supplied prices/sizes.
-            if len(chosen):
-                candidate_sets(chosen,request,hidden,missing_policy="available")
-            required = set(ROOMS[kind][0])
-            if missing_policy != "available" and not required.issubset({i["category"] for i in items}):
-                raise ValueError("JSON ішінде міндетті категориялар жетіспейді.")
+            # Rebuild each copy from the current catalog/template, not file prices.
+            lookup = {}
+            for item in catalog.to_dict("records"):
+                for copy in expand_item(item,quantities.get(item["category"],1) or 1):
+                    lookup[copy["product_id"]] = copy
+            if missing_policy == "placeholder":
+                for category in PLACEHOLDERS:
+                    if quantities.get(category,0)>0:
+                        for copy in expand_item(placeholder_item(category,request),quantities[category]):
+                            lookup[copy["product_id"]] = copy
+            if any(product_id not in lookup for product_id in ids):
+                raise ValueError("JSON тауарлары қазіргі каталогқа немесе жиһаз санына сәйкес емес.")
+            items = [lookup[product_id] for product_id in ids]
+            from collections import Counter
+            actual = Counter(i["category"] for i in items)
+            expected = {category:count for category,count in quantities.items() if count>0}
+            if dict(actual)!=expected:
+                raise ValueError("JSON жиһаз саны қазіргі параметрлерге сәйкес емес.")
             if not items:
                 raise ValueError("JSON жоспары бос.")
             if budget is not None and catalog_cost(items)>budget:
@@ -149,7 +171,10 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
             for item in items:
                 if item.get("placeholder",False):
                     continue
-                if item["product_id"] in hidden or str(item["available"]).casefold() not in {"true","1","1.0","да","yes"}:
+                if not all(pd.notna(item.get(field)) and math.isfinite(float(item[field])) and item[field]>0
+                           for field in ("price_kzt","width_cm","depth_cm")):
+                    raise ValueError("JSON тауар бағасы немесе өлшемі каталогта дұрыс емес.")
+                if item.get("base_product_id",item["product_id"]) in hidden or str(item["available"]).casefold() not in {"true","1","1.0","да","yes"}:
                     raise ValueError("Жасырылған немесе қолжетімсіз тауар.")
                 from room_engine import tags, styles
                 if color and color not in tags(item["color"]):
@@ -262,6 +287,8 @@ elif plan:
     for number,item in enumerate(plan["items"],1):
         with right.container(border=True):
             st.write(f"**{number}. {item['name']}** · {item['product_id']}")
+            if item.get("base_product_id") != item["product_id"]:
+                st.caption(f"Тауар: {item.get('base_product_id')} · дана №{item.get('instance_number')}")
             if item.get("placeholder",False):
                 st.info(f"ҮЛГІЛІК ЖИҺАЗ · {item['width_cm']} × {item['depth_cm']} см · баға белгісіз")
                 continue
