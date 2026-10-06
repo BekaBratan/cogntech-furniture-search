@@ -6,13 +6,16 @@ import pandas as pd
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 
+from ui import apply_theme, hero, missing_image
 from core import make_search_text, search
 from catalog_io import load_catalog_file, find_product_image, memory_path, source_link_label
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = memory_path(BASE)
 
-st.set_page_config(page_title="Ақылды жиһаз іздеу", layout="wide")
+st.set_page_config(page_title="Smart Furniture · Іздеу", layout="wide")
+apply_theme()
+hero("Үйіңізге үйлесетін жиһаз.", "Қалауыңызды жазыңыз. Каталогтан түсіне, стиліне және бюджетіңізге сай жиһаз табамыз.")
 
 
 def get_hidden():
@@ -83,9 +86,10 @@ if "last_query" not in st.session_state:
 
 hidden = get_hidden()
 
-st.title("Ақылды жиһаз іздеу")
+
 st.caption(f"Каталогта {len(catalog)} тауар · {catalog.category.nunique()} категория. Бағалар каталогтан алынады.")
-st.info("Каталогта болжамды сипаттамалар бар. Карточкадағы ескертпелерді тексеріңіз. Суреттер кейін қосылады.")
+with st.expander("Каталог туралы"):
+    st.write("Каталогта болжамды сипаттамалар бар. Карточкадағы ескертпелерді тексеріңіз. Суреттер кейін қосылады.")
 
 with st.sidebar:
     st.header("Демо пайдаланушы")
@@ -143,7 +147,7 @@ if st.session_state.last_query:
                     if image:
                         st.image(str(image), width=280)
                     else:
-                        st.caption("Сурет әлі қосылмаған.")
+                        missing_image()
 
                 with info_col:
                     st.subheader(row["name"])

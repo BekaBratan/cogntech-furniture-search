@@ -11,14 +11,15 @@ import streamlit as st
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(BASE))
 from catalog_io import load_catalog_file, find_product_image, memory_path, source_link_label, catalog_key
+from ui import apply_theme, hero, missing_image
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
                          qwen_layout, cloud_layout, validate_layout, draw_layout,
                          PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError)
 
 st.set_page_config(page_title="Бөлме дизайны",layout="wide")
-st.title("Бөлме дизайны · 2D")
-st.caption("Каталогтағы нақты жиһаз, жалпы бюджет және тексерілген координаталар.")
+apply_theme()
+hero("Кеңістігіңізді жоспарлаңыз.", "Бөлме өлшемін және қалауыңызды көрсетіңіз. Жиһазды таңдап, 2D схемада орналастырамыз.")
 
 @st.cache_data
 def catalog_data(stamp):
@@ -35,7 +36,8 @@ def embeddings(texts):
 
 catalog = catalog_data((BASE/"catalog.xlsx").stat().st_mtime_ns)
 st.caption(f"Каталогта {len(catalog)} тауар · {catalog.category.nunique()} категория. Төсек өлшемі — толық сыртқы өлшем.")
-st.info("Кей өлшемдер, стиль және қолжетімділік каталогта болжамды. Бұл — алдын ала схема; сатып аларда нақты сипаттамаларды тексеріңіз. Теледидарды қабырғаға не тумбаға орналастыру әзірге қолдау таппайды.")
+with st.expander("Каталог және схема туралы"):
+    st.write("Кей өлшемдер, стиль және қолжетімділік каталогта болжамды. Бұл — алдын ала схема; сатып аларда нақты сипаттамаларды тексеріңіз. Теледидарды қабырғаға не тумбаға орналастыру әзірге қолдау таппайды.")
 query = st.text_input("Сұрау", value="Мне нужен дизайн спальни 4 на 4 метра, белая мебель, бюджет примерно 500К")
 if st.button("Сұраудан параметрлерді алу"):
     parsed = parse_room_request(query)
@@ -254,7 +256,7 @@ elif plan:
             if image:
                 st.image(str(image),width=140)
             else:
-                st.caption("Сурет әлі қосылмаған.")
+                missing_image()
             if item.get("data_notes"):
                 st.caption(item["data_notes"])
             st.write(f"{float(item['price_kzt']):,.0f} ₸ · {item['width_cm']} × {item['depth_cm']} см")
