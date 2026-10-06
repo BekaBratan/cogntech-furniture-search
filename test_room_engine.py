@@ -160,6 +160,24 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(parsed['quantities'],{'desk':1,'chair':2})
         self.assertEqual(parse_room_request('2 орындық керек')['quantities'],{'chair':2})
 
+    def test_room_design_presets(self):
+        self.assertEqual(design_quantities('bedroom')['nightstand'],2)
+        self.assertEqual(design_quantities('dining_room')['chair'],4)
+        self.assertEqual(design_quantities('office')['bookcase'],1)
+        self.assertEqual(design_quantities('dining_room',300,300)['chair'],2)
+        for kind in ROOMS:
+            counts = design_quantities(kind)
+            self.assertEqual(set(counts),set(ROOMS[kind][0]+ROOMS[kind][1]))
+            self.assertLessEqual(sum(counts.values()),20)
+
+    def test_word_quantities_and_generic_stands(self):
+        self.assertEqual(parse_room_request('Спальня, две тумбы и один комод')['quantities'],{'nightstand':2,'dresser':1})
+        self.assertEqual(parse_room_request('Жатын бөлме, екі тумба және бір төсек')['quantities'],{'nightstand':2,'bed':1})
+        self.assertEqual(parse_room_request('Office with two chairs')['quantities'],{'chair':2})
+        self.assertEqual(parse_room_request('Кабинет, стол: 2, без комода')['quantities'],{'desk':2,'dresser':0})
+        self.assertEqual(parse_room_request('екі тумба','bedroom')['quantities'],{'nightstand':2})
+        self.assertEqual(parse_room_request('два стола','office')['quantities'],{'desk':2})
+
     def test_cloud_403_details_redacted(self):
         from urllib.error import HTTPError
         key = "gsk_testsecret"

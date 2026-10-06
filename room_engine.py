@@ -47,6 +47,27 @@ PLACEHOLDERS = {
 }
 
 
+def design_quantities(room_type, width_cm=400, depth_cm=400):
+    """Editable room-type presets; not architectural or ergonomic guarantees."""
+    presets = {
+        "bedroom":{"bed":1,"wardrobe":1,"nightstand":2,"dresser":1},
+        "living_room":{"sofa":1,"wardrobe":0,"dresser":1,"coffee_table":1,"tv_stand":1,"armchair":1,"bookcase":0,"dining_table":0},
+        "office":{"desk":1,"chair":1,"bookcase":1,"dresser":0},
+        "kitchen":{"kitchen_cabinets":1,"dining_table":1,"chair":2},
+        "dining_room":{"dining_table":1,"chair":4,"dresser":1},
+    }
+    if room_type not in presets:
+        raise ValueError("Белгісіз бөлме түрі.")
+    result = dict(presets[room_type])
+    if float(width_cm)*float(depth_cm)<120000:
+        for category in ("dresser","armchair","bookcase"):
+            if category in result:
+                result[category] = 0
+        if room_type=="dining_room":
+            result["chair"] = 2
+    return result
+
+
 def placeholder_item(category, request):
     name,w,d,h = PLACEHOLDERS[category]
     return {"product_id":"PLACEHOLDER_"+category.upper(),"name":name,"category":category,
@@ -73,7 +94,7 @@ def catalog_cost(items):
     return sum(float(item["price_kzt"]) for item in items if not item.get("placeholder",False))
 
 
-def parse_room_request(text):
+def parse_room_request(text,room_type=None):
     s = text.casefold().replace("\u00a0", " ")
     out = {}
     for kind, pattern in [("bedroom", r"спаль\w*|спальн\w*|жатын|bedroom"),
@@ -98,22 +119,45 @@ def parse_room_request(text):
         if re.search(pattern, s):
             out["color"] = name
             break
+    kind = out.get("room_type",room_type or "bedroom")
+    generic_table = "desk" if kind=="office" else "dining_table"
+    generic_stand = "nightstand" if kind=="bedroom" else "tv_stand"
     quantity_patterns = {
-        "chair": r"(?:стул\w*|орындық\w*|chair\w*)",
-        "desk": r"(?:письменн\w*\s+стол\w*|жұмыс\s+үстел\w*|desk\w*)",
+        "chair": r"(?:стул\w*|орындық\w*|chairs?)",
+        "desk": r"(?:письменн\w*\s+стол\w*|жұмыс\s+үстел\w*|desks?)",
         "dining_table": r"(?:обеденн\w*\s+стол\w*|асхана\s+үстел\w*)",
-        "wardrobe": r"(?:шкаф\w*|wardrobe\w*)",
-        "bed": r"(?:кроват\w*|төсек\w*|bed\w*)",
-        "sofa": r"(?:диван\w*|sofa\w*)",
-        "dresser": r"(?:комод\w*|dresser\w*)",
-        "nightstand": r"(?:прикроватн\w*\s+тумб\w*|nightstand\w*)",
-        "armchair": r"(?:кресл\w*|armchair\w*)",
+        "wardrobe": r"(?:шкаф\w*|wardrobes?)",
+        "bed": r"(?:кроват\w*|төсек\w*|beds?)",
+        "sofa": r"(?:диван\w*|sofas?)",
+        "dresser": r"(?:комод\w*|dressers?)",
+        "nightstand": r"(?:прикроватн\w*\s+тумб\w*|nightstands?)",
+        "armchair": r"(?:кресл\w*|armchairs?)",
+        "coffee_table": r"(?:журнальн\w*\s+стол\w*|coffee\s+tables?)",
+        "tv_stand": r"(?:тв\s*тумб\w*|тумб\w*\s+(?:под\s+)?тв|tv\s+stands?)",
+        "bookcase": r"(?:книжн\w*\s+шкаф\w*|кітап\s+шкаф\w*|bookcases?)",
+        "kitchen_cabinets": r"(?:кухонн\w*\s+гарнитур\w*|гарнитур\w*|kitchen\s+cabinets?)",
     }
+    quantity_patterns[generic_table] += r"|(?:стол(?:а|ы|ов|у|ом|ами|ах|е)?|үстел\w*)"
+    quantity_patterns[generic_stand] += r"|(?:тумб\w*)"
+    number_words = {"бір":1,"один":1,"одна":1,"одно":1,"one":1,
+                    "екі":2,"два":2,"две":2,"two":2,
+                    "үш":3,"три":3,"three":3,"төрт":4,"четыре":4,"four":4,
+                    "бес":5,"пять":5,"five":5,"алты":6,"шесть":6,"six":6}
+    number = r"(?:\d+|"+"|".join(number_words)+r")"
     quantities = {}
     for category,pattern in quantity_patterns.items():
-        match = re.search(r"\b(\d+)\s*(?:дана\s*)?"+pattern,s)
+        noun = r"(?:"+pattern+r")"
+        before = re.search(r"\b("+number+r")\s*(?:дана\s*)?"+noun+r"\b",s)
+        after = re.search(r"\b"+noun+r"\s*[:=–-]?\s*("+number+r")\s*(?:дана|шт\w*)?\b",s)
+        match = before or after
         if match:
-            quantities[category] = int(match[1])
+            value = match[1]
+            quantities[category] = int(value) if value.isdigit() else number_words[value]
+        elif re.search(r"\b"+noun+r"\b",s):
+            quantities[category] = 1
+        if (re.search(r"\b(?:без|without)\s+(?:любого\s+)?"+noun+r"\b",s)
+                or re.search(r"\b"+noun+r"\s+(?:керек\s+емес|қажет\s+емес|не\s+нуж\w*)\b",s)):
+            quantities[category] = 0
     if quantities:
         out["quantities"] = quantities
     return out

@@ -62,3 +62,9 @@ The floor plan has no 300px image height cap; use the full-width toggle for a la
 Missing requested furniture defaults to clearly marked templates. The room page lets users choose 1–6 copies per category (0 disables optional categories), up to 20 items. Counts in queries such as "1 письменный стол и 2 стула" populate the controls.
 Each copy has its own layout ID and coordinates, while base_product_id retains the catalog identity for images and hidden-item checks. Catalog prices multiply by count; template prices remain unknown. JSON import rebuilds copies from current catalog/template data and checks category counts.
 Product search also understands "бағасы 100 ден төмен" as a 100 KZT cap; "100 мың" means 100,000 KZT. The applied price cap appears above results.
+
+
+### Query-driven design defaults
+The root application now uses Streamlit navigation and opens the room designer by default. Product search lives at /Search (views/product_search.py).
+Quantity controls update automatically when a room query changes. Digit counts, Russian/Kazakh/English numbers one through six, counts after category names, generic tables/stands in room context and explicit optional omissions are supported.
+When not specified, counts come from editable room/size presets: bedroom two nightstands, dining room four chairs, with reduced discretionary furniture for rooms under 12 m². These are prototype defaults, not an architectural guarantee. New queries reset counts to design presets before applying explicit requests.

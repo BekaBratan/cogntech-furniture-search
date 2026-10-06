@@ -16,7 +16,7 @@ from ui import apply_theme, hero, missing_image
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
                          qwen_layout, cloud_layout, validate_layout, draw_layout,
-                         PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError, LayoutValidationError, expand_item)
+                         PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError, LayoutValidationError, expand_item, design_quantities)
 
 st.set_page_config(page_title="Бөлме дизайны",layout="wide")
 apply_theme()
@@ -39,27 +39,44 @@ catalog = catalog_data((BASE/"catalog.xlsx").stat().st_mtime_ns)
 st.caption(f"Каталогта {len(catalog)} тауар · {catalog.category.nunique()} категория. Төсек өлшемі — толық сыртқы өлшем.")
 with st.expander("Каталог және схема туралы"):
     st.write("Кей өлшемдер, стиль және қолжетімділік каталогта болжамды. Бұл — алдын ала схема; сатып аларда нақты сипаттамаларды тексеріңіз. Теледидарды қабырғаға не тумбаға орналастыру әзірге қолдау таппайды.")
-query = st.text_input("Сұрау", value="Мне нужен дизайн спальни 4 на 4 метра, белая мебель, бюджет примерно 500К")
-if st.button("Сұраудан параметрлерді алу"):
-    parsed = parse_room_request(query)
-    st.session_state["use_budget"] = "budget_kzt" in parsed
-    for source,key in [("room_type","room_kind"),("width_cm","room_w"),("depth_cm","room_d"),
-                       ("budget_kzt","room_budget"),("color","room_color"),("style","room_style")]:
+DEFAULT_QUERY = "Мне нужен дизайн спальни 4 на 4 метра, белая мебель, бюджет примерно 500К"
+
+def apply_query_parameters():
+    parsed = parse_room_request(st.session_state.get("room_query",DEFAULT_QUERY),st.session_state.get("room_kind","bedroom"))
+    messages = []
+    for source,key in [("room_type","room_kind"),("width_cm","room_w"),("depth_cm","room_d"),("budget_kzt","room_budget")]:
         if source in parsed:
-            if source in {"width_cm", "depth_cm"} and not 100 <= parsed[source] <= 2000:
-                st.warning("Бөлме өлшемі 100–2000 см аралығында болуы керек; қолмен түзетіңіз.")
-            elif source == "budget_kzt" and parsed[source] < 1000:
-                st.warning("Бюджет кемінде 1000 ₸ болуы керек; қолмен түзетіңіз.")
+            if source in {"width_cm","depth_cm"} and not 100<=parsed[source]<=2000:
+                messages.append("Бөлме өлшемі 100–2000 см аралығында болуы керек.")
+            elif source=="budget_kzt" and parsed[source]<1000:
+                messages.append("Бюджет кемінде 1000 ₸ болуы керек.")
             else:
                 st.session_state[key] = parsed[source]
-    parsed_kind = parsed.get("room_type",st.session_state.get("room_kind","bedroom"))
+    st.session_state["use_budget"] = "budget_kzt" in parsed
+    st.session_state["room_color"] = parsed.get("color","")
+    st.session_state["room_style"] = parsed.get("style","")
+    kind = st.session_state.get("room_kind","bedroom")
+    defaults = design_quantities(kind,st.session_state.get("room_w",400),st.session_state.get("room_d",400))
     for category,count in parsed.get("quantities",{}).items():
-        if category in set(ROOMS[parsed_kind][0]+ROOMS[parsed_kind][1]):
-            if 1<=count<=6:
-                st.session_state[f"quantity_{parsed_kind}_{category}"] = count
-            else:
-                st.warning("Бір категориядан 1–6 дана таңдауға болады; санды қолмен түзетіңіз.")
-    st.info("Төмендегі параметрлерді тексеріңіз. Есік пен терезені бөлек белгілеңіз.")
+        if category not in defaults:
+            messages.append("Бөлме түріне сәйкес емес категория: "+category)
+        elif not 0<=count<=6 or (category in ROOMS[kind][0] and count==0):
+            messages.append("Қосымша жиһаз саны 0–6, міндетті жиһаз саны 1–6 болуы керек: "+category)
+        else:
+            defaults[category] = count
+    for category,count in defaults.items():
+        st.session_state[f"quantity_{kind}_{category}"] = count
+    st.session_state["query_messages"] = messages
+
+if "room_query" not in st.session_state:
+    st.session_state["room_query"] = DEFAULT_QUERY
+    apply_query_parameters()
+query = st.text_input("Сұрау",key="room_query",on_change=apply_query_parameters,
+    help="Бөлме түрі, өлшемі, бюджеті және жиһаз саны сұраудан автоматты алынады. Мысалы: екі тумба, 1 үстел, 4 орындық.")
+st.button("Сұраудан параметрлерді алу",on_click=apply_query_parameters)
+for message in st.session_state.get("query_messages",[]):
+    st.warning(message)
+st.caption("Сан көрсетілмесе, бөлме түрі мен көлеміне сай бастапқы жиынтық беріледі. Төменнен өзгертуге болады.")
 
 a,b,c = st.columns(3)
 kind = a.selectbox("Бөлме түрі",list(ROOMS),key="room_kind",format_func=lambda value: {"bedroom":"Жатын бөлме","living_room":"Қонақ бөлме","office":"Жұмыс бөлмесі","kitchen":"Асүй","dining_room":"Асхана"}[value])
@@ -105,7 +122,7 @@ with st.expander("Жиһаз категориялары және саны",expan
     columns = st.columns(3)
     for index,category in enumerate(ROOMS[kind][0]+ROOMS[kind][1]):
         mandatory = category in ROOMS[kind][0]
-        default = 1 if mandatory or category in set(catalog.category) else 0
+        default = design_quantities(kind,width,depth).get(category,0)
         quantity_key = f"quantity_{kind}_{category}"
         quantities[category] = columns[index%3].number_input(quantity_names.get(category,category)+" · дана",
             min_value=1 if mandatory else 0,max_value=6,value=None if quantity_key in st.session_state else default,step=1,key=quantity_key)
