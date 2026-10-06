@@ -23,6 +23,27 @@ class RoomTests(unittest.TestCase):
     def test_selection(self):
         sets = candidate_sets(pd.DataFrame(self.items),self.room)
         self.assertEqual({i["product_id"] for i in sets[0]},{"B","W"})
+    def test_available_partial(self):
+        items = candidate_sets(pd.DataFrame(self.items[1:]),self.room,missing_policy="available")[0]
+        self.assertEqual([i["product_id"] for i in items],["W"])
+    def test_placeholder_missing_bed(self):
+        items = candidate_sets(pd.DataFrame(self.items[1:]),self.room,missing_policy="placeholder")[0]
+        virtual = [i for i in items if i.get("placeholder")]
+        self.assertEqual(virtual[0]["category"],"bed")
+        self.assertIsNone(virtual[0]["price_kzt"])
+        self.assertEqual(catalog_cost(items),41000)
+        p = algorithm_layout(items,self.room)
+        self.assertIsNotNone(p)
+        self.assertEqual(validate_layout(items,p,self.room),[])
+    def test_placeholder_does_not_replace_present_bed(self):
+        items = candidate_sets(pd.DataFrame(self.items),self.room,missing_policy="placeholder")[0]
+        self.assertFalse(any(i.get("placeholder") for i in items))
+    def test_placeholders_all_missing(self):
+        df = pd.DataFrame(self.items).iloc[:0]
+        items = candidate_sets(df,self.room,missing_policy="placeholder")[0]
+        self.assertEqual(len(items),2)
+        self.assertEqual(catalog_cost(items),0)
+        self.assertTrue(all(i.get("placeholder") and i["price_kzt"] is None for i in items))
     def test_hidden_required(self):
         with self.assertRaises(ValueError):
             candidate_sets(pd.DataFrame(self.items),self.room,{"B"})

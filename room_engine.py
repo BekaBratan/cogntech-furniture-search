@@ -27,6 +27,27 @@ COLORS = {
     "черный": r"\b(?:қара|ч[её]рн\w*|black)\b",
 }
 
+# Prototype defaults, not manufacturer specifications or dimensions of a sale item.
+PLACEHOLDERS = {
+    "bed": ("Үлгілік төсек",160,210,100),
+    "wardrobe": ("Үлгілік шкаф",120,60,200),
+    "sofa": ("Үлгілік диван",220,90,85),
+    "desk": ("Үлгілік үстел",120,60,75),
+    "chair": ("Үлгілік орындық",50,50,90),
+}
+
+
+def placeholder_item(category, request):
+    name,w,d,h = PLACEHOLDERS[category]
+    return {"product_id":"PLACEHOLDER_"+category.upper(),"name":name,"category":category,
+            "width_cm":w,"depth_cm":d,"height_cm":h,"price_kzt":None,"placeholder":True,
+            "color":request.get("color") or "анықталмаған","style":request.get("style") or "",
+            "available":False,"product_url":None,"score":0.0,"room_types":request["room_type"]}
+
+
+def catalog_cost(items):
+    return sum(float(item["price_kzt"]) for item in items if not item.get("placeholder",False))
+
 
 def parse_room_request(text):
     s = text.casefold().replace("\u00a0", " ")
@@ -70,10 +91,12 @@ def styles(value):
     return normalized
 
 
-def candidate_sets(catalog, request, hidden=(), scores=None, limit=12):
+def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_policy="strict"):
     """Bounded beam search; not a proof of global optimality."""
     if request["room_type"] not in ROOMS:
         raise ValueError("Бөлме түрі қолдау таппайды.")
+    if missing_policy not in {"strict","available","placeholder"}:
+        raise ValueError("Белгісіз жетіспейтін категория саясаты.")
     for key in ("width_cm", "depth_cm", "budget_kzt"):
         if not math.isfinite(float(request[key])) or request[key] <= 0:
             raise ValueError(f"Қате параметр: {key}")
@@ -87,32 +110,41 @@ def candidate_sets(catalog, request, hidden=(), scores=None, limit=12):
     df = df[df["available"].astype(str).str.casefold().isin(["true", "1", "1.0", "да", "yes"])]
     df["category"] = df["category"].astype(str).str.strip().str.casefold()
     if request.get("color"):
-        df = df[df["color"].apply(lambda v: request["color"] in tags(v))]
+        df = df.loc[df["color"].apply(lambda v: request["color"] in tags(v)).astype(bool)]
     if request.get("style"):
         if "style" not in df:
-            raise ValueError("Каталогқа style бағанын қосыңыз.")
-        df = df[df["style"].apply(lambda v: request["style"] in styles(v))]
+            df["style"] = ""
+        df = df.loc[df["style"].apply(lambda v: request["style"] in styles(v)).astype(bool)]
     if "room_types" in df:
-        df = df[df["room_types"].apply(lambda v: not tags(v) or request["room_type"] in tags(v))]
+        df = df.loc[df["room_types"].apply(lambda v: not tags(v) or request["room_type"] in tags(v)).astype(bool)]
     w, d = request["width_cm"], request["depth_cm"]
     df = df[((df.width_cm <= w) & (df.depth_cm <= d)) | ((df.depth_cm <= w) & (df.width_cm <= d))]
     df["score"] = df["product_id"].map(scores or {}).fillna(0.0)
     required, optional = ROOMS[request["room_type"]]
     groups = {cat: df[df.category == cat].sort_values(["score", "price_kzt"], ascending=[False, True]).head(8).to_dict("records") for cat in required + optional}
     missing = [cat for cat in required if not groups[cat]]
-    if missing:
+    if missing and missing_policy == "strict":
         raise ValueError("Сәйкес міндетті жиһаз жоқ: " + ", ".join(missing))
+    if missing_policy == "placeholder":
+        for cat in missing:
+            item = placeholder_item(cat,request)
+            if not ((item["width_cm"]<=w and item["depth_cm"]<=d) or (item["depth_cm"]<=w and item["width_cm"]<=d)):
+                raise ValueError("Үлгілік жиһаз бөлмеге сыймайды: "+cat)
+            groups[cat] = [item]
+    if not any(groups.values()):
+        raise ValueError("Каталогтан сәйкес жиһаз табылмады.")
     states = [([], 0.0, 0.0)]
     for cat in required + optional:
-        options = groups[cat] + ([None] if cat in optional else [])
+        options = groups[cat] + ([None] if cat in optional or (cat in missing and missing_policy == "available") else [])
         expanded = []
         for items, cost, score in states:
             for item in options:
-                newcost = cost + (item["price_kzt"] if item else 0)
+                newcost = cost + (catalog_cost([item]) if item else 0)
                 if newcost <= request["budget_kzt"]:
                     expanded.append((items + ([item] if item else []), newcost,
                                      score + (1 + item["score"] if item else 0)))
         states = sorted(expanded, key=lambda s: (-s[2], s[1]))[:120]
+    states = [state for state in states if state[0]]
     if not states:
         raise ValueError("Міндетті жиһаз жиынтығына бюджет жеткіліксіз.")
     return [items for items, _, _ in states[:limit]]
@@ -308,8 +340,10 @@ def draw_layout(items, placements, request, blocked=(), clearance=60):
     for n,p in enumerate(placements):
         rect = rectangle(lookup[p["product_id"]],p)
         x,y,w,d = rect
-        ax.add_patch(Rectangle((x,y),w,d,facecolor=colors[n%4],edgecolor="#34495e"))
-        ax.text(x+w/2,y+d/2,f'{p["product_id"]}\n{lookup[p["product_id"]]["category"]}\n{w:g} x {d:g} cm',ha="center",va="center",fontsize=8)
+        is_placeholder = lookup[p["product_id"]].get("placeholder",False)
+        ax.add_patch(Rectangle((x,y),w,d,facecolor="#f7ead5" if is_placeholder else colors[n%4],edgecolor="#34495e",hatch="//" if is_placeholder else None))
+        label = lookup[p["product_id"]]["category"] + (" (PLACEHOLDER)" if is_placeholder else "")
+        ax.text(x+w/2,y+d/2,f'{label}\n{p["product_id"]}\n{w:g} x {d:g} cm',ha="center",va="center",fontsize=7)
         X,Y,W,D = front_zone(rect,p["rotation_deg"],clearance)
         ax.add_patch(Rectangle((X,Y),W,D,fill=False,edgecolor="#999999",linestyle=":"))
     for x,y,w,d in blocked:

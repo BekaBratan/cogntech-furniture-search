@@ -12,7 +12,8 @@ BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(BASE))
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
-                         qwen_layout, cloud_layout, validate_layout, draw_layout)
+                         qwen_layout, cloud_layout, validate_layout, draw_layout,
+                         PLACEHOLDERS, placeholder_item, catalog_cost)
 
 st.set_page_config(page_title="Бөлме дизайны",layout="wide")
 st.title("Бөлме дизайны · 2D")
@@ -79,6 +80,11 @@ except (ValueError,TypeError):
 if not blocked:
     st.warning("Алдын ала схема: есік пен терезе орны көрсетілмеген.")
 
+policy_label = st.radio("Қажетті категория табылмаса",["Бар жиһазбен жоспар жасау","Үлгілік жиһазбен толықтыру","Толық жиынтықты талап ету"])
+missing_policy = {"Бар жиһазбен жоспар жасау":"available","Үлгілік жиһазбен толықтыру":"placeholder","Толық жиынтықты талап ету":"strict"}[policy_label]
+if missing_policy == "placeholder":
+    st.caption("Үлгілік жиһаз — сатып алынатын тауар емес. Стандартты прототип өлшемі беріледі, бағасы белгісіз.")
+
 mode = st.radio("Орналастыру әдісі",["AI · бұлт (Groq)","AI · Qwen (жергілікті Ollama)","Алгоритм · AI емес","Дайын AI JSON жүктеу"])
 cloud_key, cloud_model = "", "openai/gpt-oss-20b"
 if "Groq" in mode:
@@ -94,7 +100,7 @@ if "Groq" in mode:
         st.info("Streamlit → Settings → Secrets: GROQ_API_KEY қосыңыз. Кілтті GitHub-қа жазбаңыз.")
 upload = st.file_uploader("Экспортталған жоспар JSON",type="json") if mode.startswith("Дайын") else None
 request = {"room_type":kind,"width_cm":width,"depth_cm":depth,"budget_kzt":budget,"color":color,"style":style}
-fingerprint = json.dumps([request,blocked,clearance,query,mode],sort_keys=True)
+fingerprint = json.dumps([request,blocked,clearance,query,mode,missing_policy],sort_keys=True)
 
 if st.button("Жиһаз таңдап, схема жасау",type="primary"):
     st.session_state.pop("room_plan",None)
@@ -113,18 +119,33 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
             ids = [str(p["product_id"]) for p in plan["placements"]]
             if len(ids)!=len(set(ids)):
                 raise ValueError("JSON ішінде қайталанған ID бар.")
+            virtual = []
+            for category in PLACEHOLDERS:
+                candidate = placeholder_item(category,request)
+                if candidate["product_id"] in ids:
+                    if missing_policy != "placeholder":
+                        raise ValueError("Бұл JSON үшін үлгілік жиһаз режимін таңдаңыз.")
+                    virtual.append(candidate)
             chosen = catalog[catalog.product_id.isin(ids)].copy()
             for column in ("width_cm", "depth_cm", "price_kzt"):
                 chosen[column] = pd.to_numeric(chosen[column], errors="coerce")
-            items = chosen.to_dict("records")
+            items = chosen.to_dict("records") + virtual
             if len(items)!=len(ids):
                 raise ValueError("JSON тауарлары қазіргі каталогта жоқ.")
             # Enforce current catalog constraints, not file-supplied prices/sizes.
-            candidate_sets(chosen,request,hidden)
-            if sum(float(i["price_kzt"]) for i in items)>budget:
+            if len(chosen):
+                candidate_sets(chosen,request,hidden,missing_policy="available")
+            required = set(ROOMS[kind][0])
+            if missing_policy != "available" and not required.issubset({i["category"] for i in items}):
+                raise ValueError("JSON ішінде міндетті категориялар жетіспейді.")
+            if not items:
+                raise ValueError("JSON жоспары бос.")
+            if catalog_cost(items)>budget:
                 raise ValueError("Жалпы баға бюджеттен асады.")
             # Every imported item must itself pass the selection rules.
             for item in items:
+                if item.get("placeholder",False):
+                    continue
                 if item["product_id"] in hidden or str(item["available"]).casefold() not in {"true","1","1.0","да","yes"}:
                     raise ValueError("Жасырылған немесе қолжетімсіз тауар.")
                 from room_engine import tags, styles
@@ -141,11 +162,11 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
             source = "JSON импорт · AI шығу тегі қолданушы файлынан, геометрия тексерілді"
         else:
             with st.spinner("Каталогты бағалау және жоспар құру..."):
-                candidate_sets(catalog,request,hidden)
+                candidate_sets(catalog,request,hidden,missing_policy=missing_policy)
                 texts = tuple(make_search_text(r) for _,r in catalog.iterrows())
                 scores = embeddings(texts) @ e5().encode(["query: "+query],normalize_embeddings=True,convert_to_numpy=True)[0]
                 score_map = dict(zip(catalog.product_id,map(float,scores)))
-                sets = candidate_sets(catalog,request,hidden,score_map)
+                sets = candidate_sets(catalog,request,hidden,score_map,missing_policy=missing_policy)
                 placements, items = None, None
                 for selected in sets:
                     if mode.startswith("AI"):
@@ -192,15 +213,25 @@ if plan and plan["fingerprint"] != fingerprint:
     st.info("Параметрлер өзгерді. Жоспарды қайта жасаңыз.")
 elif plan:
     st.success(plan["source"])
+    present_categories = {i["category"] for i in plan["items"]}
+    omitted = set(ROOMS[kind][0])-present_categories
+    if omitted:
+        st.warning("Ішінара жоспар: каталогтан сәйкес жиһаз табылмады — "+", ".join(sorted(omitted)))
     left,right = st.columns([3,2])
     fig = draw_layout(plan["items"],plan["placements"],request,blocked,clearance)
     left.pyplot(fig)
-    total = sum(float(i["price_kzt"]) for i in plan["items"])
-    right.metric("Жалпы баға",f"{total:,.0f} ₸")
-    right.write(f"Қалған бюджет: {budget-total:,.0f} ₸")
+    total = catalog_cost(plan["items"])
+    placeholders = [i for i in plan["items"] if i.get("placeholder",False)]
+    right.metric("Каталог жиһазының бағасы" if placeholders else "Жалпы баға",f"{total:,.0f} ₸")
+    right.write(f"Каталог жиһазынан кейінгі бюджет: {budget-total:,.0f} ₸")
+    if placeholders:
+        right.warning("Үлгілік жиһаз бағасы белгісіз. Толық жиынтықтың бюджетке сыятыны расталмаған.")
     for item in plan["items"]:
         with right.container(border=True):
             st.write(f"**{item['name']}** · {item['product_id']}")
+            if item.get("placeholder",False):
+                st.info(f"ҮЛГІЛІК ЖИҺАЗ · {item['width_cm']} × {item['depth_cm']} см · баға белгісіз")
+                continue
             for p in (BASE/"images").glob(str(item["product_id"])+".*"):
                 if p.suffix.casefold() in {".jpg",".jpeg",".png",".webp"}:
                     st.image(str(p),width=140)
