@@ -87,6 +87,41 @@ class RoomTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cloud_layout(self.items,self.room,"")
 
+    def test_invalid_model_layout_is_geometry_error(self):
+        calls = []
+        def generator(messages):
+            calls.append(list(messages))
+            return '{"placements":[]}'
+        with self.assertRaises(LayoutValidationError):
+            qwen_layout(self.items,self.room,generator=generator)
+        self.assertEqual(len(calls),3)
+        self.assertIn('validated_starting_layout',calls[0][-1]['content'])
+
+    def test_model_receives_valid_seed(self):
+        def generator(messages):
+            brief = json.loads(messages[-1]['content'].split('Request: ',1)[1])
+            seed = brief['validated_starting_layout']
+            self.assertEqual(validate_layout(self.items,seed['placements'],self.room),[])
+            return json.dumps(seed)
+        plan = qwen_layout(self.items,self.room,generator=generator)
+        self.assertEqual(validate_layout(self.items,plan,self.room),[])
+
+    def test_living_room_uses_catalog_categories(self):
+        items = [dict(product_id=cat,name=cat,category=cat,width_cm=w,depth_cm=d,price_kzt=10000,available=True,color='белый',style='minimalist')
+                 for cat,w,d in [('sofa',200,90),('wardrobe',80,45),('dresser',75,33),('dining_table',120,80)]]
+        room = {**self.room,'room_type':'living_room'}
+        selected = candidate_sets(pd.DataFrame(items),room)[0]
+        self.assertEqual({i['category'] for i in selected},{'sofa','wardrobe','dresser','dining_table'})
+        alternatives = candidate_sets(pd.DataFrame(items),room)
+        self.assertTrue(any(len(group)==1 and group[0]['category']=='sofa' for group in alternatives))
+        plan = algorithm_layout(selected,room)
+        self.assertIsNotNone(plan)
+        self.assertEqual(validate_layout(selected,plan,room),[])
+
+    def test_new_room_types(self):
+        self.assertEqual(parse_room_request('Асүй 4 на 4 метра')['room_type'],'kitchen')
+        self.assertEqual(parse_room_request('Дизайн столовой 4 на 4 метра')['room_type'],'dining_room')
+
     def test_cloud_403_details_redacted(self):
         from urllib.error import HTTPError
         key = "gsk_testsecret"

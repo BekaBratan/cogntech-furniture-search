@@ -46,7 +46,13 @@ HTTP жауаптары тесттерде имитацияланады. Нақ�
 
 
 ### Catalog update (140 products)
-Both pages share catalog_io.py: comma decimals are normalized, image_file is respected, missing pictures are allowed. Seven search categories: bed, wardrobe, kitchen_cabinets, dining_table, tv, sofa, dresser. Room selection currently supports bedroom, living_room and office; televisions need mounting/support logic and are search-only.
+Both pages share catalog_io.py: comma decimals are normalized, image_file is respected, missing pictures are allowed. Seven search categories: bed, wardrobe, kitchen_cabinets, dining_table, tv, sofa, dresser. Room selection supports bedroom, living_room, office, kitchen and dining_room; televisions need mounting/support logic and are search-only.
 Some catalog dimensions/style/availability are estimated and 89 links point to category pages; cards expose data_notes and distinguish category links from product links.
 Old image blobs are ignored using legacy_image_hashes.json because IDs P001–P015 were reassigned. Upload replacement images to the image_file paths; new file content becomes visible automatically. Old pictures are retained.
 SQLite memory is scoped by the catalog content hash to prevent old hidden IDs from hiding unrelated products. Editing the catalog starts a new memory scope.
+
+
+### Layout improvements
+Living rooms also consider wardrobes, dressers and dining tables. Candidate selection reserves smaller sets so optional pieces do not exclude every geometric plan.
+Models receive a validated algorithm layout as a starting point and may improve it. Invalid model geometry raises a geometry error, not an API permission error. Optional algorithm fallback is labelled explicitly as non-AI.
+The floor plan has no 300px image height cap; use the full-width toggle for a larger view. Numbered blocks correspond to the furniture list.

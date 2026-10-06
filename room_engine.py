@@ -9,8 +9,10 @@ import pandas as pd
 
 ROOMS = {
     "bedroom": (["bed", "wardrobe"], ["nightstand", "dresser"]),
-    "living_room": (["sofa"], ["coffee_table", "tv_stand", "armchair"]),
+    "living_room": (["sofa"], ["wardrobe", "dresser", "coffee_table", "tv_stand", "armchair", "bookcase", "dining_table"]),
     "office": (["desk", "chair"], ["bookcase", "dresser"]),
+    "kitchen": (["kitchen_cabinets"], ["dining_table", "chair"]),
+    "dining_room": (["dining_table"], ["chair", "dresser"]),
 }
 STYLE_PATTERNS = {
     "minimalist": r"минимал\w*|minimal\w*",
@@ -34,6 +36,8 @@ PLACEHOLDERS = {
     "sofa": ("Үлгілік диван",220,90,85),
     "desk": ("Үлгілік үстел",120,60,75),
     "chair": ("Үлгілік орындық",50,50,90),
+    "kitchen_cabinets": ("Үлгілік асүй жиһазы",180,60,85),
+    "dining_table": ("Үлгілік асхана үстелі",120,80,75),
 }
 
 
@@ -54,7 +58,9 @@ def parse_room_request(text):
     out = {}
     for kind, pattern in [("bedroom", r"спаль\w*|спальн\w*|жатын|bedroom"),
                           ("living_room", r"гостин\w*|қонақ|living"),
-                          ("office", r"кабинет\w*|офис\w*|office")]:
+                          ("office", r"кабинет\w*|офис\w*|office"),
+                          ("kitchen", r"кухн\w*|асүй|ас\s+үй|kitchen"),
+                          ("dining_room", r"столов\w*|асхана|dining")]:
         if re.search(pattern, s):
             out["room_type"] = kind
             break
@@ -146,11 +152,28 @@ def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_p
                 if budget is None or newcost <= budget:
                     expanded.append((items + ([item] if item else []), newcost,
                                      score + (1 + item["score"] if item else 0)))
-        states = sorted(expanded, key=lambda s: (-s[2], s[1]))[:120]
+        ranked_states = sorted(expanded, key=lambda s: (-s[2], s[1]))
+        counts_at_step = sorted({len(state[0]) for state in ranked_states},reverse=True)
+        states = ranked_states[:max(1,120-len(counts_at_step)+1)]
+        for count in counts_at_step:
+            state = next(state for state in ranked_states if len(state[0])==count)
+            signature = tuple(str(i["product_id"]) for i in state[0])
+            if not any(tuple(str(i["product_id"]) for i in s[0])==signature for s in states) and len(states)<120:
+                states.append(state)
     states = [state for state in states if state[0]]
     if not states:
         raise ValueError("Міндетті жиһаз жиынтығына бюджет жеткіліксіз.")
-    return [items for items, _, _ in states[:limit]]
+    # Reserve smaller valid sets so optional furniture cannot prevent any plan.
+    counts = sorted({len(state[0]) for state in states},reverse=True)
+    selected_states = states[:max(1,limit-len(counts)+1)]
+    signatures = {tuple(str(i["product_id"]) for i in state[0]) for state in selected_states}
+    for count in counts:
+        state = next(state for state in states if len(state[0])==count)
+        signature = tuple(str(i["product_id"]) for i in state[0])
+        if signature not in signatures and len(selected_states)<limit:
+            selected_states.append(state)
+            signatures.add(signature)
+    return [items for items, _, _ in selected_states]
 
 
 def rectangle(item, placement):
@@ -253,7 +276,9 @@ def layout_examples(room_type):
     categories = {
         "bedroom": [("EX_BED","bed",160,210,120,0,0), ("EX_WARDROBE","wardrobe",80,45,0,355,180)],
         "living_room": [("EX_SOFA","sofa",200,90,100,0,0), ("EX_TABLE","coffee_table",100,50,150,190,0)],
-        "office": [("EX_DESK","desk",120,60,0,340,180), ("EX_CHAIR","chair",50,50,35,220,0)]
+        "office": [("EX_DESK","desk",120,60,0,340,180), ("EX_CHAIR","chair",50,50,35,220,0)],
+        "kitchen": [("EX_KITCHEN","kitchen_cabinets",180,60,0,340,180), ("EX_TABLE","dining_table",120,80,220,160,0)],
+        "dining_room": [("EX_TABLE","dining_table",120,80,140,160,0)]
     }
     examples = []
     for size in (400,500):
@@ -269,14 +294,22 @@ def layout_examples(room_type):
     return examples
 
 
+class LayoutValidationError(ValueError):
+    """The model responded but its geometry remained invalid."""
+
+
 def qwen_layout(items, request, blocked=(), clearance=60, generator=None):
     """Local Ollama only: no paid API, no arbitrary remote endpoint."""
     brief = {"room":request,"blocked_zones_cm":list(blocked),"front_clearance_cm":clearance,
              "furniture":[{k:i[k] for k in ("product_id","category","width_cm","depth_cm")} for i in items]}
+    seed = algorithm_layout(items,request,blocked,clearance)
+    if seed is not None:
+        brief["validated_starting_layout"] = {"placements":seed}
     instruction = ('You plan room furniture. Output JSON {"placements":[{"product_id":"ID","x_cm":0,"y_cm":0,"rotation_deg":0}]}. '
                    'Use every supplied ID exactly once. Do not invent or change furniture dimensions. Coordinates in centimetres, bottom-left origin. '
                    'Furniture must not overlap, leave blocked zones empty, stay inside room. '
                    'Rotation 0 faces +y, 90 faces -x, 180 faces -y, 270 faces +x. Reserve stated front clearance inside room. '
+                   'A validated_starting_layout, when supplied, satisfies the constraints. You may return it unchanged or improve it while preserving validity. '
                    'JSON only. Request: '+json.dumps(brief,ensure_ascii=False))
     messages = [{"role":"system","content":"Plan furniture placement using the examples. Example IDs must NEVER appear in the final plan. Dimensions and coordinates are in centimetres."}]
     for example in layout_examples(request["room_type"]):
@@ -302,7 +335,7 @@ def qwen_layout(items, request, blocked=(), clearance=60, generator=None):
             return placements
         messages.extend([{"role":"assistant","content":content},
                          {"role":"user","content":"Correct these errors, return full JSON: "+"; ".join(errors)}])
-    raise ValueError("Qwen жоспары тексерістен өтпеді: "+"; ".join(errors))
+    raise LayoutValidationError("AI жоспары геометрия тексерісінен өтпеді: "+"; ".join(errors))
 
 
 class CloudServiceError(ValueError):
@@ -354,8 +387,9 @@ def cloud_layout(items, request, api_key, model="openai/gpt-oss-20b", blocked=()
 def draw_layout(items, placements, request, blocked=(), clearance=60):
     from matplotlib.figure import Figure
     from matplotlib.patches import Rectangle
-    fig = Figure(figsize=(7,7))
+    fig = Figure(figsize=(10,10),dpi=150)
     ax = fig.subplots()
+    fig.subplots_adjust(left=.08,right=.98,bottom=.08,top=.98)
     colors = ["#d8e8f5", "#e8dfef", "#e6edd6", "#f3e3cd"]
     lookup = {str(i["product_id"]):i for i in items}
     for n,p in enumerate(placements):
@@ -363,13 +397,18 @@ def draw_layout(items, placements, request, blocked=(), clearance=60):
         x,y,w,d = rect
         is_placeholder = lookup[p["product_id"]].get("placeholder",False)
         ax.add_patch(Rectangle((x,y),w,d,facecolor="#f7ead5" if is_placeholder else colors[n%4],edgecolor="#34495e",hatch="//" if is_placeholder else None))
-        label = lookup[p["product_id"]]["category"] + (" (PLACEHOLDER)" if is_placeholder else "")
-        ax.text(x+w/2,y+d/2,f'{label}\n{p["product_id"]}\n{w:g} x {d:g} cm',ha="center",va="center",fontsize=7)
+        category = lookup[p["product_id"]]["category"]
+        label = {"bed":"Төсек","wardrobe":"Шкаф","sofa":"Диван","dresser":"Комод",
+                 "desk":"Үстел","chair":"Орындық","dining_table":"Асхана үстелі",
+                 "kitchen_cabinets":"Асүй жиһазы"}.get(category,category)
+        number = next(k+1 for k,item in enumerate(items) if str(item["product_id"])==p["product_id"])
+        ax.text(x+w/2,y+d/2,f'{number}. {label}\n{w:g} × {d:g} см',ha="center",va="center",fontsize=10)
         X,Y,W,D = front_zone(rect,p["rotation_deg"],clearance)
         ax.add_patch(Rectangle((X,Y),W,D,fill=False,edgecolor="#999999",linestyle=":"))
     for x,y,w,d in blocked:
         ax.add_patch(Rectangle((x,y),w,d,facecolor="#f3b8b8",alpha=.7,hatch="//"))
     ax.set(xlim=(0,request["width_cm"]),ylim=(0,request["depth_cm"]),xlabel="cm",ylabel="cm",aspect="equal")
     ax.grid(alpha=.2)
-    fig.tight_layout()
+    ax.tick_params(labelsize=10)
+    fig.tight_layout(pad=1)
     return fig

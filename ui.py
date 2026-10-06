@@ -8,7 +8,7 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
   background:#fff; color:var(--ink);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 }
-[data-testid="stMainBlockContainer"] { max-width:1220px; padding:3rem 2.2rem 5rem; }
+[data-testid="stMainBlockContainer"] { max-width:1500px; padding:3rem 2.2rem 5rem; }
 [data-testid="stHeader"] { background:rgba(255,255,255,.94); border-bottom:1px solid #f0f0f2; }
 [data-testid="stSidebar"] { background:var(--surface); border-right:1px solid var(--line); }
 h1,h2,h3 { color:var(--ink); letter-spacing:-.035em; font-weight:650; }
@@ -38,7 +38,7 @@ button:focus-visible, a:focus-visible { outline:3px solid #0071e3 !important; ou
 [data-testid="stAlert"] { border-radius:16px; }
 [data-testid="stMetric"] { background:var(--surface); border-radius:20px; padding:1.3rem 1.5rem; }
 [data-testid="stMetricValue"] { font-weight:600; letter-spacing:-.04em; }
-[data-testid="stImage"] img { border-radius:18px; object-fit:contain; max-height:300px; }
+[data-testid="stImage"] img { border-radius:18px; object-fit:contain; }
 .sf-image-empty { min-height:220px; border-radius:20px; background:var(--surface); display:flex;
   flex-direction:column; justify-content:center; align-items:center; gap:14px; color:#86868b; font-size:.84rem; text-align:center; padding:20px; }
 .sf-image-empty svg { width:46px; height:46px; stroke:#aeaeb2; }
@@ -65,3 +65,4 @@ def missing_image():
     <svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="6" y="8" width="36" height="32" rx="6" stroke-width="1.5"/>
     <circle cx="17" cy="19" r="3" stroke-width="1.5"/><path d="M8 34l10-10 8 8 6-6 8 8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span>Сурет әлі қосылмаған</span></div>""",unsafe_allow_html=True)
+

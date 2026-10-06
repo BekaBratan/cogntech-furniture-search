@@ -15,7 +15,7 @@ from ui import apply_theme, hero, missing_image
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
                          qwen_layout, cloud_layout, validate_layout, draw_layout,
-                         PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError)
+                         PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError, LayoutValidationError)
 
 st.set_page_config(page_title="Бөлме дизайны",layout="wide")
 apply_theme()
@@ -54,7 +54,7 @@ if st.button("Сұраудан параметрлерді алу"):
     st.info("Төмендегі параметрлерді тексеріңіз. Есік пен терезені бөлек белгілеңіз.")
 
 a,b,c = st.columns(3)
-kind = a.selectbox("Бөлме түрі",list(ROOMS),key="room_kind")
+kind = a.selectbox("Бөлме түрі",list(ROOMS),key="room_kind",format_func=lambda value: {"bedroom":"Жатын бөлме","living_room":"Қонақ бөлме","office":"Жұмыс бөлмесі","kitchen":"Асүй","dining_room":"Асхана"}[value])
 width = b.number_input("Бөлме ені, см",min_value=100.,max_value=2000.,value=None if "room_w" in st.session_state else 400.,step=10.,key="room_w")
 depth = c.number_input("Бөлме ұзындығы, см",min_value=100.,max_value=2000.,value=None if "room_d" in st.session_state else 400.,step=10.,key="room_d")
 use_budget = st.checkbox("Бюджет шектеуін қолдану",value=False,key="use_budget")
@@ -101,7 +101,7 @@ if "Groq" in mode:
     if not cloud_key:
         st.info("Streamlit → Settings → Secrets: GROQ_API_KEY қосыңыз. Кілтті GitHub-қа жазбаңыз.")
 upload = st.file_uploader("Экспортталған жоспар JSON",type="json") if mode.startswith("Дайын") else None
-fallback = st.checkbox("Groq қолжетімсіз болса, алгоритммен жоспар жасау",value=True) if "Groq" in mode else False
+fallback = st.checkbox("AI қате берсе, алгоритммен жоспар жасау",value=True) if mode.startswith("AI") else False
 request = {"room_type":kind,"width_cm":width,"depth_cm":depth,"budget_kzt":budget,"color":color,"style":style}
 fingerprint = json.dumps([catalog_key(BASE),request,blocked,clearance,query,mode,missing_policy,fallback],sort_keys=True)
 
@@ -172,34 +172,41 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
                 sets = candidate_sets(catalog,request,hidden,score_map,missing_policy=missing_policy)
                 placements, items = None, None
                 used_fallback = False
-                for selected in sets:
-                    if mode.startswith("AI"):
-                        if "Groq" in mode:
-                            if used_fallback:
-                                placements = algorithm_layout(selected,request,blocked,clearance)
-                            else:
-                                try:
-                                    placements = cloud_layout(selected,request,cloud_key,cloud_model,blocked,clearance)
-                                except CloudServiceError as exc:
-                                    if not fallback:
-                                        raise
-                                    st.warning(str(exc))
-                                    st.info("Схема алгоритм арқылы жасалады. Бұл нәтиже AI моделімен жасалмаған.")
-                                    used_fallback = True
-                                    placements = algorithm_layout(selected,request,blocked,clearance)
-                        else:
-                            placements = qwen_layout(selected,request,blocked,clearance)
-                    else:
+                fallback_reason = ""
+                geometry_errors = []
+                for attempt, selected in enumerate(sets):
+                    if used_fallback or not mode.startswith("AI"):
                         placements = algorithm_layout(selected,request,blocked,clearance)
+                    else:
+                        try:
+                            placements = (cloud_layout(selected,request,cloud_key,cloud_model,blocked,clearance)
+                                          if "Groq" in mode else qwen_layout(selected,request,blocked,clearance))
+                        except CloudServiceError as exc:
+                            if not fallback:
+                                raise
+                            fallback_reason = str(exc)
+                            used_fallback = True
+                            placements = algorithm_layout(selected,request,blocked,clearance)
+                        except LayoutValidationError as exc:
+                            geometry_errors.append(str(exc))
+                            if fallback:
+                                fallback_reason = str(exc)
+                                used_fallback = True
+                                placements = algorithm_layout(selected,request,blocked,clearance)
+                            elif attempt >= 2 or attempt == len(sets)-1:
+                                raise
+                            else:
+                                continue
                     if placements is not None:
                         items = selected
                         break
                 if placements is None:
-                    raise ValueError("Іздеу шегінде жарамды жоспар табылмады. Бұл барлық мүмкін жоспар жоқ дегенді білдірмейді.")
+                    raise ValueError("Іздеу шегінде жарамды жоспар табылмады. Бос орын талабын немесе бөлме өлшемдерін тексеріңіз.")
                 source = (f"AI · Groq / {cloud_model} + Python тексерісі" if "Groq" in mode else
                           "AI · Qwen2.5-3B + Python тексерісі" if mode.startswith("AI") else "Алгоритм · AI емес")
                 if used_fallback:
-                    source = "Алгоритм · AI емес (Groq қолжетімсіз)"
+                    st.warning(fallback_reason)
+                    source = "Алгоритм · AI емес (AI жоспары жасалмады)"
         st.session_state.room_plan = {"items":items,"placements":placements,"request":request,"blocked":blocked,
                                       "clearance":clearance,"source":source,"fingerprint":fingerprint}
         with sqlite3.connect(str(memory_path(BASE,"room_memory"))) as conn:
@@ -207,9 +214,11 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
             conn.execute("INSERT INTO plans(payload) VALUES (?)",(json.dumps(st.session_state.room_plan,ensure_ascii=False,default=str),))
     except Exception as exc:
         st.error(str(exc))
-        if "Groq" in mode:
-            st.info("API кілті және аккаунттағы тегін лимиттерді тексеріңіз. Алгоритм режимі модель сервисін қажет етпейді.")
-        elif mode.startswith("AI"):
+        if isinstance(exc,LayoutValidationError):
+            st.info("AI жауабы келді, бірақ жиһаздардың бос орындары сәйкес емес. «AI қате берсе, алгоритммен жоспар жасау» қосқышын қосыңыз немесе алгоритм әдісін таңдаңыз.")
+        elif isinstance(exc,CloudServiceError):
+            st.info("Groq сервисіне қолжетімділікті тексеріңіз. Алгоритм әдісі API қажет етпейді.")
+        elif mode.startswith("AI") and "Groq" not in mode:
             st.info("Ноутбукта Ollama іске қосылып, ollama pull qwen2.5:3b орындалуы керек. Бұлттағы localhost ноутбугыңызға қосылмайды.")
 
 with st.expander("Сақталған соңғы жоспарды жадтан оқу"):
@@ -234,9 +243,13 @@ elif plan:
     omitted = set(ROOMS[kind][0])-present_categories
     if omitted:
         st.warning("Ішінара жоспар: каталогтан сәйкес жиһаз табылмады — "+", ".join(sorted(omitted)))
-    left,right = st.columns([3,2])
     fig = draw_layout(plan["items"],plan["placements"],request,blocked,clearance)
-    left.pyplot(fig)
+    if st.toggle("Схеманы толық енде көрсету",value=False):
+        st.pyplot(fig,width="stretch")
+        right = st.container()
+    else:
+        left,right = st.columns([4,2],gap="large")
+        left.pyplot(fig,width="stretch")
     total = catalog_cost(plan["items"])
     placeholders = [i for i in plan["items"] if i.get("placeholder",False)]
     right.metric("Каталог жиһазының бағасы" if placeholders else "Жалпы баға",f"{total:,.0f} ₸")
@@ -246,9 +259,9 @@ elif plan:
         right.caption("Бюджет көрсетілмеген: баға шектеуі қолданылмады.")
     if placeholders:
         right.warning("Үлгілік жиһаз бағасы белгісіз. Толық жиынтықтың бюджетке сыятыны расталмаған.")
-    for item in plan["items"]:
+    for number,item in enumerate(plan["items"],1):
         with right.container(border=True):
-            st.write(f"**{item['name']}** · {item['product_id']}")
+            st.write(f"**{number}. {item['name']}** · {item['product_id']}")
             if item.get("placeholder",False):
                 st.info(f"ҮЛГІЛІК ЖИҺАЗ · {item['width_cm']} × {item['depth_cm']} см · баға белгісіз")
                 continue
