@@ -1,10 +1,14 @@
 import re
 import pandas as pd
+from room_engine import STYLE_PATTERNS, styles
 
 category_names = {
     "sofa": "диван",
     "wardrobe": "шкаф",
-    "dresser": "комод"
+    "dresser": "комод",
+    "bed": "кровать", "nightstand": "тумба", "desk": "письменный стол",
+    "chair": "стул", "coffee_table": "журнальный стол", "tv_stand": "тумба ТВ",
+    "armchair": "кресло", "bookcase": "книжный шкаф"
 }
 
 
@@ -27,7 +31,8 @@ def make_search_text(row):
         category_names.get(row["category"], str(row["category"])),
         text_value(row, "color"),
         text_value(row, "material"),
-        text_value(row, "description")
+        text_value(row, "description"),
+        text_value(row, "style")
     ]
 
     return " ".join(" ".join(parts).split())
@@ -37,6 +42,14 @@ def parse_query(query):
     filters = {}
 
     category_patterns = {
+        "nightstand": r"\b(?:прикроватн\w*\s+тумб\w*|nightstand)\b",
+        "coffee_table": r"\b(?:журнальн\w*\s+стол\w*|coffee_table)\b",
+        "tv_stand": r"\b(?:тв\s*тумб\w*|tv_stand)\b",
+        "bed": r"\b(?:кроват\w*|төсек\w*|bed)\b",
+        "desk": r"\b(?:письменн\w*\s+стол\w*|desk)\b",
+        "chair": r"\b(?:стул\w*|орындық\w*|chair)\b",
+        "armchair": r"\b(?:кресл\w*|armchair)\b",
+        "bookcase": r"\b(?:книжн\w*\s+шкаф\w*|bookcase)\b",
         "sofa": r"\b(?:диван\w*|sofa)\b",
         "wardrobe": r"\b(?:шкаф\w*|wardrobe)\b",
         "dresser": r"\b(?:комод\w*|dresser)\b",
@@ -57,6 +70,11 @@ def parse_query(query):
             filters["color"] = color
             break
 
+    for style, pattern in STYLE_PATTERNS.items():
+        if re.search(pattern, text):
+            filters["style"] = style
+            break
+
     return filters
 
 def parse_limits(query):
@@ -66,9 +84,9 @@ def parse_limits(query):
     # Қолдайтын мысалдар:
     # "бюджет 50000", "бюджет 50 000 теңге", "бюджет 50 мың"
     budget_match = re.search(
-        r"\bбюджет(?:і)?\s*[:=]?\s*"
+        r"\bбюджет(?:і)?\s*(?:примерно|шамамен|около|до)?\s*[:=]?\s*"
         r"(\d+(?:[.,]\d+)?(?:[ ]\d{3})*)"
-        r"\s*(мың|тыс\.?)?",
+        r"\s*(мың|тыс\.?|[kк])?",
         text
     )
 
@@ -124,6 +142,9 @@ def evaluate_rules(row, filters, hidden):
         checks["R4: ен шектеуіне сәйкес"] = (
             pd.notna(width) and width <= filters["max_width_cm"]
         )
+
+    if "style" in filters:
+        checks["R7: стиль сәйкес"] = filters["style"] in styles(row.get("style", ""))
 
     available = str(row.get("available", "")).strip().casefold()
     checks["R5: қолжетімді"] = available in {

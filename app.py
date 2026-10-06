@@ -100,7 +100,7 @@ if "last_query" not in st.session_state:
 hidden = get_hidden()
 
 st.title("Ақылды жиһаз іздеу")
-st.caption("15 тауар: диван, шкаф және комод. Бағалар каталогтан алынады.")
+st.caption(f"Каталогта {len(catalog)} тауар. Бағалар каталогтан алынады.")
 
 with st.sidebar:
     st.header("Демо пайдаланушы")

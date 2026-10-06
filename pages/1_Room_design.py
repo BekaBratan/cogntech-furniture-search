@@ -1,0 +1,215 @@
+"""Streamlit multipage room planner; run from the existing app.py."""
+import io
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+BASE = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(BASE))
+from core import make_search_text
+from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
+                         qwen_layout, cloud_layout, validate_layout, draw_layout)
+
+st.set_page_config(page_title="Бөлме дизайны",layout="wide")
+st.title("Бөлме дизайны · 2D")
+st.caption("Каталогтағы нақты жиһаз, жалпы бюджет және тексерілген координаталар.")
+
+@st.cache_data
+def catalog_data(stamp):
+    df = pd.read_excel(BASE/"catalog.xlsx",dtype={"product_id":str,"model":str})
+    required = {"product_id","category","price_kzt","width_cm","depth_cm","available","color","name"}
+    missing = required-set(df.columns)
+    if missing:
+        raise ValueError("Бағандар жетіспейді: "+", ".join(sorted(missing)))
+    return df
+
+@st.cache_resource
+def e5():
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer("intfloat/multilingual-e5-small",device="cpu")
+
+@st.cache_data
+def embeddings(texts):
+    return e5().encode(["passage: "+t for t in texts],normalize_embeddings=True,convert_to_numpy=True)
+
+catalog = catalog_data((BASE/"catalog.xlsx").stat().st_mtime_ns)
+st.caption(f"Каталогта {len(catalog)} тауар. Төсек өлшемі — толық сыртқы өлшем.")
+query = st.text_input("Сұрау", value="Мне нужен дизайн спальни 4 на 4 метра, белая мебель, бюджет примерно 500К")
+if st.button("Сұраудан параметрлерді алу"):
+    parsed = parse_room_request(query)
+    for source,key in [("room_type","room_kind"),("width_cm","room_w"),("depth_cm","room_d"),
+                       ("budget_kzt","room_budget"),("color","room_color"),("style","room_style")]:
+        if source in parsed:
+            if source in {"width_cm", "depth_cm"} and not 100 <= parsed[source] <= 2000:
+                st.warning("Бөлме өлшемі 100–2000 см аралығында болуы керек; қолмен түзетіңіз.")
+            elif source == "budget_kzt" and parsed[source] < 1000:
+                st.warning("Бюджет кемінде 1000 ₸ болуы керек; қолмен түзетіңіз.")
+            else:
+                st.session_state[key] = parsed[source]
+    st.info("Төмендегі параметрлерді тексеріңіз. Есік пен терезені бөлек белгілеңіз.")
+
+a,b,c = st.columns(3)
+kind = a.selectbox("Бөлме түрі",list(ROOMS),key="room_kind")
+width = b.number_input("Бөлме ені, см",min_value=100.,max_value=2000.,value=None if "room_w" in st.session_state else 400.,step=10.,key="room_w")
+depth = c.number_input("Бөлме ұзындығы, см",min_value=100.,max_value=2000.,value=None if "room_d" in st.session_state else 400.,step=10.,key="room_d")
+a,b,c = st.columns(3)
+budget = a.number_input("Барлық жиһазға бюджет, ₸",min_value=1000.,value=None if "room_budget" in st.session_state else 500000.,step=10000.,key="room_budget")
+color = b.selectbox("Жиһаз түсі",["", "белый","зеленый","серый","бежевый","черный"],key="room_color")
+style = c.selectbox("Интерьер стилі",["", "minimalist","scandinavian","loft","classic","modern"],key="room_style")
+clearance = st.number_input("Жиһаз алдында бос орын, см",min_value=0.,max_value=150.,value=60.,step=10.)
+st.caption("Бос орын — прототиптің бапталатын ережесі. Ол құрылыс нормасы емес; тұтас жүру жолы мен төсектің екі бүйірі бөлек тексерілмейді.")
+with st.expander("Есік / терезе алдындағы бос аймақтар"):
+    st.write("Төменгі сол бұрыш — (0, 0). Есік ашылатын және бос қалатын аймақтарды тіктөртбұрышпен белгілеңіз.")
+    zones = st.data_editor(pd.DataFrame(columns=["x_cm","y_cm","width_cm","depth_cm"]),num_rows="dynamic",key="blocked_zones")
+blocked = []
+try:
+    for _,z in zones.dropna(how="all").iterrows():
+        vals = [float(z[k]) for k in ("x_cm","y_cm","width_cm","depth_cm")]
+        x,y,w,d = vals
+        if not all(pd.notna(v) and abs(v)<1e6 for v in vals) or min(x,y)<0 or min(w,d)<=0 or x+w>width or y+d>depth:
+            raise ValueError("Бос аймақ координаталарын тексеріңіз.")
+        blocked.append(tuple(vals))
+except (ValueError,TypeError):
+    st.error("Есік/терезе аймағы қате: барлық төрт мәнді толтырыңыз, аймақ бөлме ішінде болсын.")
+    st.stop()
+if not blocked:
+    st.warning("Алдын ала схема: есік пен терезе орны көрсетілмеген.")
+
+mode = st.radio("Орналастыру әдісі",["AI · бұлт (Groq)","AI · Qwen (жергілікті Ollama)","Алгоритм · AI емес","Дайын AI JSON жүктеу"])
+cloud_key, cloud_model = "", "openai/gpt-oss-20b"
+if "Groq" in mode:
+    import os
+    cloud_key = os.getenv("GROQ_API_KEY", "")
+    cloud_model = os.getenv("GROQ_MODEL", cloud_model)
+    try:
+        cloud_key = st.secrets.get("GROQ_API_KEY",cloud_key)
+        cloud_model = st.secrets.get("GROQ_MODEL",cloud_model)
+    except st.errors.StreamlitSecretNotFoundError:
+        pass
+    if not cloud_key:
+        st.info("Streamlit → Settings → Secrets: GROQ_API_KEY қосыңыз. Кілтті GitHub-қа жазбаңыз.")
+upload = st.file_uploader("Экспортталған жоспар JSON",type="json") if mode.startswith("Дайын") else None
+request = {"room_type":kind,"width_cm":width,"depth_cm":depth,"budget_kzt":budget,"color":color,"style":style}
+fingerprint = json.dumps([request,blocked,clearance,query,mode],sort_keys=True)
+
+if st.button("Жиһаз таңдап, схема жасау",type="primary"):
+    st.session_state.pop("room_plan",None)
+    try:
+        if mode.startswith("Дайын") and upload is None:
+            raise ValueError("Алдымен жоспар JSON файлын жүктеңіз.")
+        hidden = set()
+        db = BASE/"memory.sqlite"
+        if db.exists():
+            with sqlite3.connect(str(db)) as conn:
+                exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hidden_products'").fetchone()
+                if exists:
+                    hidden = {r[0] for r in conn.execute("SELECT product_id FROM hidden_products")}
+        if upload is not None:
+            plan = json.load(upload)
+            ids = [str(p["product_id"]) for p in plan["placements"]]
+            if len(ids)!=len(set(ids)):
+                raise ValueError("JSON ішінде қайталанған ID бар.")
+            chosen = catalog[catalog.product_id.isin(ids)].copy()
+            for column in ("width_cm", "depth_cm", "price_kzt"):
+                chosen[column] = pd.to_numeric(chosen[column], errors="coerce")
+            items = chosen.to_dict("records")
+            if len(items)!=len(ids):
+                raise ValueError("JSON тауарлары қазіргі каталогта жоқ.")
+            # Enforce current catalog constraints, not file-supplied prices/sizes.
+            candidate_sets(chosen,request,hidden)
+            if sum(float(i["price_kzt"]) for i in items)>budget:
+                raise ValueError("Жалпы баға бюджеттен асады.")
+            # Every imported item must itself pass the selection rules.
+            for item in items:
+                if item["product_id"] in hidden or str(item["available"]).casefold() not in {"true","1","1.0","да","yes"}:
+                    raise ValueError("Жасырылған немесе қолжетімсіз тауар.")
+                from room_engine import tags, styles
+                if color and color not in tags(item["color"]):
+                    raise ValueError("JSON тауар түсі сәйкес емес.")
+                if style and style not in styles(item.get("style", "")):
+                    raise ValueError("JSON тауар стилі сәйкес емес.")
+                if tags(item.get("room_types", "")) and kind not in tags(item["room_types"]):
+                    raise ValueError("JSON тауар бөлме түріне сәйкес емес.")
+            placements = plan["placements"]
+            errors = validate_layout(items,placements,request,blocked,clearance)
+            if errors:
+                raise ValueError("; ".join(errors))
+            source = "JSON импорт · AI шығу тегі қолданушы файлынан, геометрия тексерілді"
+        else:
+            with st.spinner("Каталогты бағалау және жоспар құру..."):
+                candidate_sets(catalog,request,hidden)
+                texts = tuple(make_search_text(r) for _,r in catalog.iterrows())
+                scores = embeddings(texts) @ e5().encode(["query: "+query],normalize_embeddings=True,convert_to_numpy=True)[0]
+                score_map = dict(zip(catalog.product_id,map(float,scores)))
+                sets = candidate_sets(catalog,request,hidden,score_map)
+                placements, items = None, None
+                for selected in sets:
+                    if mode.startswith("AI"):
+                        if "Groq" in mode:
+                            placements = cloud_layout(selected,request,cloud_key,cloud_model,blocked,clearance)
+                        else:
+                            placements = qwen_layout(selected,request,blocked,clearance)
+                    else:
+                        placements = algorithm_layout(selected,request,blocked,clearance)
+                    if placements is not None:
+                        items = selected
+                        break
+                if placements is None:
+                    raise ValueError("Іздеу шегінде жарамды жоспар табылмады. Бұл барлық мүмкін жоспар жоқ дегенді білдірмейді.")
+                source = (f"AI · Groq / {cloud_model} + Python тексерісі" if "Groq" in mode else
+                          "AI · Qwen2.5-3B + Python тексерісі" if mode.startswith("AI") else "Алгоритм · AI емес")
+        st.session_state.room_plan = {"items":items,"placements":placements,"request":request,"blocked":blocked,
+                                      "clearance":clearance,"source":source,"fingerprint":fingerprint}
+        with sqlite3.connect(str(BASE/"room_memory.sqlite")) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS plans (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+            conn.execute("INSERT INTO plans(payload) VALUES (?)",(json.dumps(st.session_state.room_plan,ensure_ascii=False,default=str),))
+    except Exception as exc:
+        st.error(str(exc))
+        if "Groq" in mode:
+            st.info("API кілті және аккаунттағы тегін лимиттерді тексеріңіз. Алгоритм режимі модель сервисін қажет етпейді.")
+        elif mode.startswith("AI"):
+            st.info("Ноутбукта Ollama іске қосылып, ollama pull qwen2.5:3b орындалуы керек. Бұлттағы localhost ноутбугыңызға қосылмайды.")
+
+with st.expander("Сақталған соңғы жоспарды жадтан оқу"):
+    if st.button("SQLite-дан қалпына келтіру"):
+        db = BASE/"room_memory.sqlite"
+        if db.exists():
+            with sqlite3.connect(str(db)) as conn:
+                row = conn.execute("SELECT payload FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+            if row:
+                restored = json.loads(row[0])
+                st.json(restored)
+                st.caption("Бұл — бұрынғы жоспардың жазбасы. Қазіргі каталог пен параметрлерге қайта тексеру үшін JSON арқылы жүктеңіз.")
+        else:
+            st.info("Сақталған жоспар жоқ.")
+
+plan = st.session_state.get("room_plan")
+if plan and plan["fingerprint"] != fingerprint:
+    st.info("Параметрлер өзгерді. Жоспарды қайта жасаңыз.")
+elif plan:
+    st.success(plan["source"])
+    left,right = st.columns([3,2])
+    fig = draw_layout(plan["items"],plan["placements"],request,blocked,clearance)
+    left.pyplot(fig)
+    total = sum(float(i["price_kzt"]) for i in plan["items"])
+    right.metric("Жалпы баға",f"{total:,.0f} ₸")
+    right.write(f"Қалған бюджет: {budget-total:,.0f} ₸")
+    for item in plan["items"]:
+        with right.container(border=True):
+            st.write(f"**{item['name']}** · {item['product_id']}")
+            for p in (BASE/"images").glob(str(item["product_id"])+".*"):
+                if p.suffix.casefold() in {".jpg",".jpeg",".png",".webp"}:
+                    st.image(str(p),width=140)
+                    break
+            st.write(f"{float(item['price_kzt']):,.0f} ₸ · {item['width_cm']} × {item['depth_cm']} см")
+            if pd.notna(item.get("product_url")):
+                st.link_button("Kaspi",item["product_url"])
+    buffer = io.BytesIO()
+    fig.savefig(buffer,format="png",dpi=160)
+    st.download_button("Схеманы PNG жүктеу",buffer.getvalue(),"room_plan.png","image/png")
+    exported = {"request":request,"placements":plan["placements"],"source":plan["source"]}
+    st.download_button("Жоспар JSON",json.dumps(exported,ensure_ascii=False,indent=2),"room_plan.json","application/json")
