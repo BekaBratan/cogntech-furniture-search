@@ -10,7 +10,7 @@ import streamlit as st
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(BASE))
-from catalog_io import load_catalog_file, find_product_image, memory_path, source_link_label
+from catalog_io import load_catalog_file, find_product_image, memory_path, source_link_label, catalog_key
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
                          qwen_layout, cloud_layout, validate_layout, draw_layout,
@@ -101,7 +101,7 @@ if "Groq" in mode:
 upload = st.file_uploader("Экспортталған жоспар JSON",type="json") if mode.startswith("Дайын") else None
 fallback = st.checkbox("Groq қолжетімсіз болса, алгоритммен жоспар жасау",value=True) if "Groq" in mode else False
 request = {"room_type":kind,"width_cm":width,"depth_cm":depth,"budget_kzt":budget,"color":color,"style":style}
-fingerprint = json.dumps([request,blocked,clearance,query,mode,missing_policy,fallback],sort_keys=True)
+fingerprint = json.dumps([catalog_key(BASE),request,blocked,clearance,query,mode,missing_policy,fallback],sort_keys=True)
 
 if st.button("Жиһаз таңдап, схема жасау",type="primary"):
     st.session_state.pop("room_plan",None)
