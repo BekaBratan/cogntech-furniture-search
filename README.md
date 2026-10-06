@@ -43,3 +43,10 @@ catalog.xlsx және images/ қолданылады. Каталогты қол�
 python -m unittest test_room_engine -v
 ```
 HTTP жауаптары тесттерде имитацияланады. Нақты AI генерациясын API кілтімен бөлек тексеру қажет.
+
+
+### Catalog update (140 products)
+Both pages share catalog_io.py: comma decimals are normalized, image_file is respected, missing pictures are allowed. Seven search categories: bed, wardrobe, kitchen_cabinets, dining_table, tv, sofa, dresser. Room selection currently supports bedroom, living_room and office; televisions need mounting/support logic and are search-only.
+Some catalog dimensions/style/availability are estimated and 89 links point to category pages; cards expose data_notes and distinguish category links from product links.
+Old image blobs are ignored using legacy_image_hashes.json because IDs P001–P015 were reassigned. Upload replacement images to the image_file paths; new file content becomes visible automatically. Old pictures are retained.
+SQLite memory is scoped by the catalog content hash to prevent old hidden IDs from hiding unrelated products. Editing the catalog starts a new memory scope.

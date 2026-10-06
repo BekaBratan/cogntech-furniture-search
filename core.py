@@ -1,6 +1,6 @@
 import re
 import pandas as pd
-from room_engine import STYLE_PATTERNS, styles
+from room_engine import STYLE_PATTERNS, styles, COLORS
 
 category_names = {
     "sofa": "диван",
@@ -8,7 +8,9 @@ category_names = {
     "dresser": "комод",
     "bed": "кровать", "nightstand": "тумба", "desk": "письменный стол",
     "chair": "стул", "coffee_table": "журнальный стол", "tv_stand": "тумба ТВ",
-    "armchair": "кресло", "bookcase": "книжный шкаф"
+    "armchair": "кресло", "bookcase": "книжный шкаф",
+    "kitchen_cabinets": "асүй жиһазы кухонный гарнитур кухонные шкафы",
+    "dining_table": "асхана үстелі обеденный стол", "tv": "теледидар телевизор"
 }
 
 
@@ -42,6 +44,9 @@ def parse_query(query):
     filters = {}
 
     category_patterns = {
+        "kitchen_cabinets": r"кухонн\w*\s+(?:гарнитур\w*|шкаф\w*|мебел\w*)|гарнитур\w*|асүй\w*|ас\s+үй\w*|kitchen_cabinets",
+        "dining_table": r"обеденн\w*\s+стол\w*|асхана\s+үстел\w*|dining_table",
+        "tv": r"\b(?:телевизор\w*|теледидар\w*)\b",
         "nightstand": r"\b(?:прикроватн\w*\s+тумб\w*|nightstand)\b",
         "coffee_table": r"\b(?:журнальн\w*\s+стол\w*|coffee_table)\b",
         "tv_stand": r"\b(?:тв\s*тумб\w*|tv_stand)\b",
@@ -55,10 +60,7 @@ def parse_query(query):
         "dresser": r"\b(?:комод\w*|dresser)\b",
     }
 
-    color_patterns = {
-        "белый": r"\b(?:ақ|белый|белая|белое|белую|белого)\b",
-        "зеленый": r"\b(?:жасыл|зел[её]ный|зел[её]ная|зел[её]ную)\b",
-    }
+    color_patterns = COLORS
 
     for category, pattern in category_patterns.items():
         if re.search(pattern, text):

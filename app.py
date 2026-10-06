@@ -7,9 +7,10 @@ import streamlit as st
 from sentence_transformers import SentenceTransformer
 
 from core import make_search_text, search
+from catalog_io import load_catalog_file, find_product_image, memory_path, source_link_label
 
 BASE = Path(__file__).resolve().parent
-DB_PATH = BASE / "memory.sqlite"
+DB_PATH = memory_path(BASE)
 
 st.set_page_config(page_title="Ақылды жиһаз іздеу", layout="wide")
 
@@ -44,10 +45,7 @@ def change_hidden(product_id, hide=True):
 
 @st.cache_data
 def load_catalog(file_stamp):
-    df = pd.read_excel(
-        BASE / "catalog.xlsx",
-        dtype={"product_id": str, "model": str}
-    )
+    df = load_catalog_file(BASE)
 
     df["price_kzt"] = pd.to_numeric(df["price_kzt"], errors="coerce")
 
@@ -74,20 +72,6 @@ def build_vectors(texts):
     )
 
 
-def find_image(product_id):
-    folder = BASE / "images"
-
-    if folder.exists():
-        for path in folder.iterdir():
-            if (
-                path.stem.casefold() == product_id.casefold()
-                and path.suffix.casefold() in {".jpg", ".jpeg", ".png", ".webp"}
-            ):
-                return path
-
-    return None
-
-
 catalog = load_catalog((BASE / "catalog.xlsx").stat().st_mtime_ns)
 
 with st.spinner("Іздеу моделін дайындап жатырмыз..."):
@@ -100,7 +84,8 @@ if "last_query" not in st.session_state:
 hidden = get_hidden()
 
 st.title("Ақылды жиһаз іздеу")
-st.caption(f"Каталогта {len(catalog)} тауар. Бағалар каталогтан алынады.")
+st.caption(f"Каталогта {len(catalog)} тауар · {catalog.category.nunique()} категория. Бағалар каталогтан алынады.")
+st.info("Каталогта болжамды сипаттамалар бар. Карточкадағы ескертпелерді тексеріңіз. Суреттер кейін қосылады.")
 
 with st.sidebar:
     st.header("Демо пайдаланушы")
@@ -154,7 +139,7 @@ if st.session_state.last_query:
                 image_col, info_col = st.columns([1, 2])
 
                 with image_col:
-                    image = find_image(product_id)
+                    image = find_product_image(BASE, row)
                     if image:
                         st.image(str(image), width=280)
                     else:
@@ -166,7 +151,10 @@ if st.session_state.last_query:
                     st.write(
                         f"Түс: {row['color']} · Ені: {row['width_cm']} см"
                     )
-                    st.link_button("Kaspi-де ашу", row["product_url"])
+                    if row["product_url"]:
+                        st.link_button(source_link_label(row["product_url"]), row["product_url"])
+                    if row.get("data_notes"):
+                        st.caption(row["data_notes"])
 
                     if st.button("Жасыру", key=f"hide_{product_id}"):
                         change_hidden(product_id)

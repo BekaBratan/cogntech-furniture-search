@@ -10,6 +10,7 @@ import streamlit as st
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(BASE))
+from catalog_io import load_catalog_file, find_product_image, memory_path, source_link_label
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
                          qwen_layout, cloud_layout, validate_layout, draw_layout,
@@ -21,12 +22,7 @@ st.caption("Каталогтағы нақты жиһаз, жалпы бюдже�
 
 @st.cache_data
 def catalog_data(stamp):
-    df = pd.read_excel(BASE/"catalog.xlsx",dtype={"product_id":str,"model":str})
-    required = {"product_id","category","price_kzt","width_cm","depth_cm","available","color","name"}
-    missing = required-set(df.columns)
-    if missing:
-        raise ValueError("Бағандар жетіспейді: "+", ".join(sorted(missing)))
-    return df
+    return load_catalog_file(BASE)
 
 @st.cache_resource
 def e5():
@@ -38,7 +34,8 @@ def embeddings(texts):
     return e5().encode(["passage: "+t for t in texts],normalize_embeddings=True,convert_to_numpy=True)
 
 catalog = catalog_data((BASE/"catalog.xlsx").stat().st_mtime_ns)
-st.caption(f"Каталогта {len(catalog)} тауар. Төсек өлшемі — толық сыртқы өлшем.")
+st.caption(f"Каталогта {len(catalog)} тауар · {catalog.category.nunique()} категория. Төсек өлшемі — толық сыртқы өлшем.")
+st.info("Кей өлшемдер, стиль және қолжетімділік каталогта болжамды. Бұл — алдын ала схема; сатып аларда нақты сипаттамаларды тексеріңіз. Теледидарды қабырғаға не тумбаға орналастыру әзірге қолдау таппайды.")
 query = st.text_input("Сұрау", value="Мне нужен дизайн спальни 4 на 4 метра, белая мебель, бюджет примерно 500К")
 if st.button("Сұраудан параметрлерді алу"):
     parsed = parse_room_request(query)
@@ -112,7 +109,7 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
         if mode.startswith("Дайын") and upload is None:
             raise ValueError("Алдымен жоспар JSON файлын жүктеңіз.")
         hidden = set()
-        db = BASE/"memory.sqlite"
+        db = memory_path(BASE)
         if db.exists():
             with sqlite3.connect(str(db)) as conn:
                 exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hidden_products'").fetchone()
@@ -203,7 +200,7 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
                     source = "Алгоритм · AI емес (Groq қолжетімсіз)"
         st.session_state.room_plan = {"items":items,"placements":placements,"request":request,"blocked":blocked,
                                       "clearance":clearance,"source":source,"fingerprint":fingerprint}
-        with sqlite3.connect(str(BASE/"room_memory.sqlite")) as conn:
+        with sqlite3.connect(str(memory_path(BASE,"room_memory"))) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS plans (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
             conn.execute("INSERT INTO plans(payload) VALUES (?)",(json.dumps(st.session_state.room_plan,ensure_ascii=False,default=str),))
     except Exception as exc:
@@ -215,7 +212,7 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
 
 with st.expander("Сақталған соңғы жоспарды жадтан оқу"):
     if st.button("SQLite-дан қалпына келтіру"):
-        db = BASE/"room_memory.sqlite"
+        db = memory_path(BASE,"room_memory")
         if db.exists():
             with sqlite3.connect(str(db)) as conn:
                 row = conn.execute("SELECT payload FROM plans ORDER BY id DESC LIMIT 1").fetchone()
@@ -253,13 +250,16 @@ elif plan:
             if item.get("placeholder",False):
                 st.info(f"ҮЛГІЛІК ЖИҺАЗ · {item['width_cm']} × {item['depth_cm']} см · баға белгісіз")
                 continue
-            for p in (BASE/"images").glob(str(item["product_id"])+".*"):
-                if p.suffix.casefold() in {".jpg",".jpeg",".png",".webp"}:
-                    st.image(str(p),width=140)
-                    break
+            image = find_product_image(BASE,item)
+            if image:
+                st.image(str(image),width=140)
+            else:
+                st.caption("Сурет әлі қосылмаған.")
+            if item.get("data_notes"):
+                st.caption(item["data_notes"])
             st.write(f"{float(item['price_kzt']):,.0f} ₸ · {item['width_cm']} × {item['depth_cm']} см")
-            if pd.notna(item.get("product_url")):
-                st.link_button("Kaspi",item["product_url"])
+            if item.get("product_url"):
+                st.link_button(source_link_label(item["product_url"]),item["product_url"])
     buffer = io.BytesIO()
     fig.savefig(buffer,format="png",dpi=160)
     st.download_button("Схеманы PNG жүктеу",buffer.getvalue(),"room_plan.png","image/png")
