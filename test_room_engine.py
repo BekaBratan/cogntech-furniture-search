@@ -50,6 +50,10 @@ class RoomTests(unittest.TestCase):
     def test_budget(self):
         with self.assertRaises(ValueError):
             candidate_sets(pd.DataFrame(self.items),{**self.room,"budget_kzt":100000})
+    def test_optional_budget(self):
+        for request in ({**self.room,"budget_kzt":None},{k:v for k,v in self.room.items() if k != "budget_kzt"}):
+            items = candidate_sets(pd.DataFrame(self.items),request)[0]
+            self.assertEqual({i['product_id'] for i in items},{'B','W'})
     def test_solver(self):
         p = algorithm_layout(self.items,self.room,[(0,0,100,100)])
         self.assertIsNotNone(p)
@@ -82,6 +86,26 @@ class RoomTests(unittest.TestCase):
     def test_missing_cloud_key(self):
         with self.assertRaises(ValueError):
             cloud_layout(self.items,self.room,"")
+
+    def test_cloud_403_details_redacted(self):
+        from urllib.error import HTTPError
+        key = "gsk_testsecret"
+        body = io.BytesIO(json.dumps({"error":{"message":"Model permission denied "+key}}).encode())
+        error = HTTPError("https://api.groq.com",403,"Forbidden",{},body)
+        with patch("urllib.request.urlopen",side_effect=error) as call:
+            with self.assertRaises(CloudServiceError) as caught:
+                cloud_layout(self.items,self.room,key)
+        self.assertIn("Model permission denied",str(caught.exception))
+        self.assertNotIn(key,str(caught.exception))
+        self.assertEqual(call.call_count,1)
+        self.assertEqual(call.call_args.args[0].get_header("User-agent"),"cogntech-furniture-search/1.0")
+
+    def test_cloud_non_json_403(self):
+        from urllib.error import HTTPError
+        error = HTTPError("https://api.groq.com",403,"Forbidden",{},io.BytesIO(b"error code: 1010"))
+        with patch("urllib.request.urlopen",side_effect=error):
+            with self.assertRaisesRegex(CloudServiceError,"Cloudflare 1010"):
+                cloud_layout(self.items,self.room,"test-key")
 
 if __name__ == "__main__":
     unittest.main()

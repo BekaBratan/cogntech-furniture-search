@@ -13,7 +13,7 @@ sys.path.insert(0,str(BASE))
 from core import make_search_text
 from room_engine import (ROOMS, parse_room_request, candidate_sets, algorithm_layout,
                          qwen_layout, cloud_layout, validate_layout, draw_layout,
-                         PLACEHOLDERS, placeholder_item, catalog_cost)
+                         PLACEHOLDERS, placeholder_item, catalog_cost, CloudServiceError)
 
 st.set_page_config(page_title="Бөлме дизайны",layout="wide")
 st.title("Бөлме дизайны · 2D")
@@ -42,6 +42,7 @@ st.caption(f"Каталогта {len(catalog)} тауар. Төсек өлшем
 query = st.text_input("Сұрау", value="Мне нужен дизайн спальни 4 на 4 метра, белая мебель, бюджет примерно 500К")
 if st.button("Сұраудан параметрлерді алу"):
     parsed = parse_room_request(query)
+    st.session_state["use_budget"] = "budget_kzt" in parsed
     for source,key in [("room_type","room_kind"),("width_cm","room_w"),("depth_cm","room_d"),
                        ("budget_kzt","room_budget"),("color","room_color"),("style","room_style")]:
         if source in parsed:
@@ -57,8 +58,10 @@ a,b,c = st.columns(3)
 kind = a.selectbox("Бөлме түрі",list(ROOMS),key="room_kind")
 width = b.number_input("Бөлме ені, см",min_value=100.,max_value=2000.,value=None if "room_w" in st.session_state else 400.,step=10.,key="room_w")
 depth = c.number_input("Бөлме ұзындығы, см",min_value=100.,max_value=2000.,value=None if "room_d" in st.session_state else 400.,step=10.,key="room_d")
+use_budget = st.checkbox("Бюджет шектеуін қолдану",value=False,key="use_budget")
 a,b,c = st.columns(3)
-budget = a.number_input("Барлық жиһазға бюджет, ₸",min_value=1000.,value=None if "room_budget" in st.session_state else 500000.,step=10000.,key="room_budget")
+budget_value = a.number_input("Барлық жиһазға бюджет, ₸",min_value=1000.,value=None if "room_budget" in st.session_state else 500000.,step=10000.,key="room_budget",disabled=not use_budget)
+budget = budget_value if use_budget else None
 color = b.selectbox("Жиһаз түсі",["", "белый","зеленый","серый","бежевый","черный"],key="room_color")
 style = c.selectbox("Интерьер стилі",["", "minimalist","scandinavian","loft","classic","modern"],key="room_style")
 clearance = st.number_input("Жиһаз алдында бос орын, см",min_value=0.,max_value=150.,value=60.,step=10.)
@@ -99,8 +102,9 @@ if "Groq" in mode:
     if not cloud_key:
         st.info("Streamlit → Settings → Secrets: GROQ_API_KEY қосыңыз. Кілтті GitHub-қа жазбаңыз.")
 upload = st.file_uploader("Экспортталған жоспар JSON",type="json") if mode.startswith("Дайын") else None
+fallback = st.checkbox("Groq қолжетімсіз болса, алгоритммен жоспар жасау",value=True) if "Groq" in mode else False
 request = {"room_type":kind,"width_cm":width,"depth_cm":depth,"budget_kzt":budget,"color":color,"style":style}
-fingerprint = json.dumps([request,blocked,clearance,query,mode,missing_policy],sort_keys=True)
+fingerprint = json.dumps([request,blocked,clearance,query,mode,missing_policy,fallback],sort_keys=True)
 
 if st.button("Жиһаз таңдап, схема жасау",type="primary"):
     st.session_state.pop("room_plan",None)
@@ -140,7 +144,7 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
                 raise ValueError("JSON ішінде міндетті категориялар жетіспейді.")
             if not items:
                 raise ValueError("JSON жоспары бос.")
-            if catalog_cost(items)>budget:
+            if budget is not None and catalog_cost(items)>budget:
                 raise ValueError("Жалпы баға бюджеттен асады.")
             # Every imported item must itself pass the selection rules.
             for item in items:
@@ -168,10 +172,22 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
                 score_map = dict(zip(catalog.product_id,map(float,scores)))
                 sets = candidate_sets(catalog,request,hidden,score_map,missing_policy=missing_policy)
                 placements, items = None, None
+                used_fallback = False
                 for selected in sets:
                     if mode.startswith("AI"):
                         if "Groq" in mode:
-                            placements = cloud_layout(selected,request,cloud_key,cloud_model,blocked,clearance)
+                            if used_fallback:
+                                placements = algorithm_layout(selected,request,blocked,clearance)
+                            else:
+                                try:
+                                    placements = cloud_layout(selected,request,cloud_key,cloud_model,blocked,clearance)
+                                except CloudServiceError as exc:
+                                    if not fallback:
+                                        raise
+                                    st.warning(str(exc))
+                                    st.info("Схема алгоритм арқылы жасалады. Бұл нәтиже AI моделімен жасалмаған.")
+                                    used_fallback = True
+                                    placements = algorithm_layout(selected,request,blocked,clearance)
                         else:
                             placements = qwen_layout(selected,request,blocked,clearance)
                     else:
@@ -183,6 +199,8 @@ if st.button("Жиһаз таңдап, схема жасау",type="primary"):
                     raise ValueError("Іздеу шегінде жарамды жоспар табылмады. Бұл барлық мүмкін жоспар жоқ дегенді білдірмейді.")
                 source = (f"AI · Groq / {cloud_model} + Python тексерісі" if "Groq" in mode else
                           "AI · Qwen2.5-3B + Python тексерісі" if mode.startswith("AI") else "Алгоритм · AI емес")
+                if used_fallback:
+                    source = "Алгоритм · AI емес (Groq қолжетімсіз)"
         st.session_state.room_plan = {"items":items,"placements":placements,"request":request,"blocked":blocked,
                                       "clearance":clearance,"source":source,"fingerprint":fingerprint}
         with sqlite3.connect(str(BASE/"room_memory.sqlite")) as conn:
@@ -223,7 +241,10 @@ elif plan:
     total = catalog_cost(plan["items"])
     placeholders = [i for i in plan["items"] if i.get("placeholder",False)]
     right.metric("Каталог жиһазының бағасы" if placeholders else "Жалпы баға",f"{total:,.0f} ₸")
-    right.write(f"Каталог жиһазынан кейінгі бюджет: {budget-total:,.0f} ₸")
+    if budget is not None:
+        right.write(f"Каталог жиһазынан кейінгі бюджет: {budget-total:,.0f} ₸")
+    else:
+        right.caption("Бюджет көрсетілмеген: баға шектеуі қолданылмады.")
     if placeholders:
         right.warning("Үлгілік жиһаз бағасы белгісіз. Толық жиынтықтың бюджетке сыятыны расталмаған.")
     for item in plan["items"]:

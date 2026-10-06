@@ -97,9 +97,12 @@ def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_p
         raise ValueError("Бөлме түрі қолдау таппайды.")
     if missing_policy not in {"strict","available","placeholder"}:
         raise ValueError("Белгісіз жетіспейтін категория саясаты.")
-    for key in ("width_cm", "depth_cm", "budget_kzt"):
+    for key in ("width_cm", "depth_cm"):
         if not math.isfinite(float(request[key])) or request[key] <= 0:
             raise ValueError(f"Қате параметр: {key}")
+    budget = request.get("budget_kzt")
+    if budget is not None and (not math.isfinite(float(budget)) or budget <= 0):
+        raise ValueError("Қате параметр: budget_kzt")
     df = catalog.copy()
     if not df["product_id"].is_unique:
         raise ValueError("Каталогта қайталанған product_id бар.")
@@ -140,7 +143,7 @@ def candidate_sets(catalog, request, hidden=(), scores=None, limit=12, missing_p
         for items, cost, score in states:
             for item in options:
                 newcost = cost + (catalog_cost([item]) if item else 0)
-                if newcost <= request["budget_kzt"]:
+                if budget is None or newcost <= budget:
                     expanded.append((items + ([item] if item else []), newcost,
                                      score + (1 + item["score"] if item else 0)))
         states = sorted(expanded, key=lambda s: (-s[2], s[1]))[:120]
@@ -302,6 +305,10 @@ def qwen_layout(items, request, blocked=(), clearance=60, generator=None):
     raise ValueError("Qwen жоспары тексерістен өтпеді: "+"; ".join(errors))
 
 
+class CloudServiceError(ValueError):
+    """Cloud transport failed; a local algorithm can still build a plan."""
+
+
 def cloud_layout(items, request, api_key, model="openai/gpt-oss-20b", blocked=(), clearance=60):
     """Groq Cloud transport; shares the same validation and correction loop."""
     if not api_key or not str(api_key).strip():
@@ -313,7 +320,8 @@ def cloud_layout(items, request, api_key, model="openai/gpt-oss-20b", blocked=()
         req = urllib.request.Request(
             "https://api.groq.com/openai/v1/chat/completions",
             data=json.dumps(payload).encode(),
-            headers={"Content-Type":"application/json","Authorization":"Bearer "+api_key})
+            headers={"Content-Type":"application/json","Accept":"application/json",
+                     "User-Agent":"cogntech-furniture-search/1.0","Authorization":"Bearer "+api_key.strip()})
         try:
             with urllib.request.urlopen(req,timeout=90) as response:
                 content = json.load(response)["choices"][0]["message"]["content"]
@@ -321,10 +329,23 @@ def cloud_layout(items, request, api_key, model="openai/gpt-oss-20b", blocked=()
                 raise ValueError("Модель мәтіндік JSON қайтармады.")
             return content
         except HTTPError as exc:
+            detail = ""
+            try:
+                body = exc.read(8192).decode("utf-8",errors="replace")
+                try:
+                    error = json.loads(body).get("error",{})
+                    if isinstance(error,dict):
+                        detail = str(error.get("message", ""))
+                except (ValueError,AttributeError):
+                    if "1010" in body:
+                        detail = "Cloudflare 1010: service blocked this client."
+                detail = re.sub(r"gsk_[A-Za-z0-9_-]+", "[REDACTED]",detail.replace(api_key,"[REDACTED]"))[:400]
+            except Exception:
+                pass
             explanation = {401:"API кілтін тексеріңіз.",403:"Аккаунт/модель рұқсатын тексеріңіз.",
                            429:"Тегін сұрау лимиті бітті. Кейінірек қайталаңыз.",
                            400:"Модель немесе JSON параметрін тексеріңіз.",404:"Модель қолжетімсіз; GROQ_MODEL мәнін өзгертіңіз."}.get(exc.code,"Модель сервисі уақытша қолжетімсіз.")
-            raise ValueError(f"Groq HTTP {exc.code}: {explanation}") from None
+            raise CloudServiceError(f"Groq HTTP {exc.code}: {explanation}" + (" · "+detail if detail else "")) from None
         except URLError:
             raise ValueError("Модель серверіне қосылу мүмкін болмады.") from None
     return qwen_layout(items,request,blocked,clearance,generator=generate)
